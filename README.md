@@ -73,6 +73,57 @@ AAuth protocol is enabled per realm. Configuration can be done via:
    - `aauth.allowed.agents` - Comma-separated list of allowed agent IDs
    - `aauth.allowed.scopes` - Comma-separated list of allowed scopes
 
+### AAuth Scopes That Trigger User Consent
+
+When an agent requests an auth token, the auth server evaluates the requested scopes to decide whether to return a `request_token` (requiring user consent) or an `auth_token` (direct grant). You can configure which scopes trigger the user consent flow via realm attributes.
+
+**Realm attributes:**
+
+| Attribute | Description |
+|-----------|-------------|
+| `aauth.consent.required.scopes` | JSON array of scope names that require user consent. Any requested scope that exactly matches an entry triggers the consent flow. |
+| `aauth.consent.required.scope.prefixes` | JSON array of scope name prefixes. Any requested scope whose name starts with one of these prefixes triggers the consent flow. |
+
+**Default behavior:** When both attributes are **not set** (missing or empty), the system uses defaults:
+- **Exact matches:** `openid`, `profile`, `email`
+- **Prefixes:** `user.`, `profile.`, `email.`
+
+**Important:** Once you set either attribute (even to `[]`), the system uses **only** your configured lists and does not apply defaults. To restore defaults, remove the attributes entirely.
+
+**Quick setup via script:**
+```bash
+./scripts/set_aauth_consent_attributes.sh [BASE_URL] [REALM_NAME] [ADMIN_USER] [ADMIN_PASSWORD]
+```
+
+**Example:**
+```bash
+./scripts/set_aauth_consent_attributes.sh http://localhost:8080 aauth-test admin admin
+```
+
+**Customize via environment variables:**
+```bash
+export AAUTH_CONSENT_SCOPES='["openid","profile","email","calendar.read"]'
+export AAUTH_CONSENT_PREFIXES='["user.","profile.","email."]'
+./scripts/set_aauth_consent_attributes.sh http://localhost:8080 aauth-test admin admin
+```
+
+**Manual configuration via Admin API:** Add the attributes to your realm JSON when updating the realm:
+```json
+{
+  "attributes": {
+    "aauth.consent.required.scopes": "[\"openid\",\"profile\",\"email\",\"calendar.read\"]",
+    "aauth.consent.required.scope.prefixes": "[\"user.\",\"profile.\",\"email.\"]"
+  }
+}
+```
+
+**Examples:**
+- `scope=openid` → `request_token` (exact match)
+- `scope=user.preferences` → `request_token` (prefix match)
+- `scope=data.read` → `auth_token` (no match, direct grant)
+
+For detailed configuration, examples, and troubleshooting, see [docs/AAUTH_CONSENT_CONFIG.md](../docs/AAUTH_CONSENT_CONFIG.md).
+
 ### Agent Policies
 
 Configure which agents are allowed to request tokens:
