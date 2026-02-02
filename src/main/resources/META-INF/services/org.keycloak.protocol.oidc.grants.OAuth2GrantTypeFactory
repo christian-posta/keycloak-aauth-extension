@@ -1,0 +1,4 @@
+org.keycloak.protocol.aauth.grants.AuthGrantTypeFactory
+org.keycloak.protocol.aauth.grants.CodeGrantTypeFactory
+org.keycloak.protocol.aauth.grants.RefreshGrantTypeFactory
+org.keycloak.protocol.aauth.grants.ExchangeGrantTypeFactory
