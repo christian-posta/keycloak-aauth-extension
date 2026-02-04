@@ -22,6 +22,7 @@ import org.keycloak.OAuthErrorException;
 import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
+import org.keycloak.protocol.aauth.AAuthConfig;
 import org.keycloak.protocol.aauth.AAuthTokenManager;
 import org.keycloak.protocol.aauth.policy.AAuthPolicyEvaluator;
 import org.keycloak.protocol.aauth.policy.DefaultAAuthPolicyEvaluator;
@@ -211,33 +212,23 @@ public class AuthGrantType implements OAuth2GrantType {
 
     /**
      * Determine if user consent is required for this authorization request.
-     * 
-     * Phase 3: Basic policy - require consent for user-specific scopes.
+     *
+     * Configurable policy - require consent based on realm attributes
+     * (aauth.consent.required.scopes, aauth.consent.required.scope.prefixes).
+     * Falls back to backward-compatible defaults if not configured.
      */
     private boolean requiresUserConsent(RealmModel realm, String scope, String resourceId) {
         if (scope != null && !scope.trim().isEmpty()) {
+            AAuthConfig config = AAuthConfig.forRealm(realm);
             String[] scopes = scope.split("\\s+");
             for (String s : scopes) {
-                if (isUserScope(s)) {
+                if (config.isConsentRequiredForScope(s)) {
                     return true;
                 }
             }
         }
         // Future: Check resource-specific policies, user context requirements, etc.
         return false;
-    }
-
-    /**
-     * Check if a scope requires user consent.
-     */
-    private boolean isUserScope(String scope) {
-        // User-specific scopes that require consent
-        return "profile".equals(scope) || 
-               "email".equals(scope) || 
-               "openid".equals(scope) ||
-               scope.startsWith("user.") ||
-               scope.startsWith("profile.") ||
-               scope.startsWith("email.");
     }
 
     /**

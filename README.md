@@ -36,20 +36,26 @@ This extension provides the AAuth (Autonomous Authorization) protocol implementa
 3. **Rebuild Keycloak:**
    ```bash
    cd $KEYCLOAK_HOME
-   ./bin/kc.sh build
+   ./kc.sh build
    ```
    
    Or start Keycloak with optimization disabled:
    ```bash
-   ./bin/kc.sh start --optimized=false
+   ./kc.sh start-dev
+   ./kc.sh start-dev --log-level=org.keycloak.protocol.aauth:DEBUG
    ```
 
+4. **Verify installation:**
+   Check the Keycloak logs for:
+   - `AAuthLoginProtocolFactory` registration
+   - `AAuthSignatureFilter` registration
+   - AAuth grant type factories registration
 
 ## Configuration
 
 ### Enable AAuth Protocol
 
-AAuth protocol is enabled per realm by default. Configuration can be done via:
+AAuth protocol is enabled per realm. Configuration can be done via:
 
 1. **Admin API:**
    ```bash
@@ -64,11 +70,9 @@ AAuth protocol is enabled per realm by default. Configuration can be done via:
    ```
 
 2. **Realm Attributes:**
-   | Attribute | Description |
-   |-----------|-------------|
-   | `aauth.enabled` | Enable/disable AAuth protocol (**default: true**) |
-   | `aauth.allowed.agents` | **JSON array** of allowed agent IDs (e.g. `["https://agent1.example.com","https://agent2.example.com"]`) |
-   | `aauth.allowed.scopes` | **JSON array** of allowed scopes (e.g. `["openid","profile"]`) |
+   - `aauth.enabled` - Enable/disable AAuth protocol (default: false)
+   - `aauth.allowed.agents` - Comma-separated list of allowed agent IDs
+   - `aauth.allowed.scopes` - Comma-separated list of allowed scopes
 
 ### AAuth Scopes That Trigger User Consent
 
@@ -81,11 +85,11 @@ When an agent requests an auth token, the auth server evaluates the requested sc
 | `aauth.consent.required.scopes` | JSON array of scope names that require user consent. Any requested scope that exactly matches an entry triggers the consent flow. |
 | `aauth.consent.required.scope.prefixes` | JSON array of scope name prefixes. Any requested scope whose name starts with one of these prefixes triggers the consent flow. |
 
-**Default behavior:** Defaults are used whenever both attributes are empty (whether unset or set to `[]`):
+**Default behavior:** When both attributes are **not set** (missing or empty), the system uses defaults:
 - **Exact matches:** `openid`, `profile`, `email`
 - **Prefixes:** `user.`, `profile.`, `email.`
 
-**Important:** To use only your configured lists (and not the defaults), at least one attribute must contain at least one entry.
+**Important:** Once you set either attribute (even to `[]`), the system uses **only** your configured lists and does not apply defaults. To restore defaults, remove the attributes entirely.
 
 **Quick setup via script:**
 ```bash
@@ -125,9 +129,9 @@ For detailed configuration, examples, and troubleshooting, see [docs/AAUTH_CONSE
 
 Configure which agents are allowed to request tokens:
 
-- **Allowed Agents:** List of agent identifiers (typically HTTPS URLs; exact match only, no patterns)
+- **Allowed Agents:** List of agent HTTPS URLs or patterns
 - **Allowed Scopes:** List of scopes that can be requested
-- **Policy Evaluator:** Interface for policy evaluation (default uses realm attributes; custom implementations possible but not via SPI)
+- **Policy Evaluator:** Custom policy evaluation logic (via SPI)
 
 ## Usage
 
@@ -141,15 +145,13 @@ curl https://keycloak.example.com/realms/{realm}/.well-known/aauth-issuer
 ### Request Auth Token
 
 **Direct Grant (no user consent):**
-
-Use `scope` when the agent is acting as the resource (self-authorization), or `resource_token` when the agent accesses another resource:
 ```bash
 curl -X POST "https://keycloak.example.com/realms/{realm}/protocol/aauth/agent/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -H "Signature-Key: keyid=\"...\", scheme=\"jwt\", ..." \
   -H "Signature-Input: sig1=..." \
   -H "Signature: sig1=:..." \
-  -d "request_type=auth&scope=read write"
+  -d "grant_type=auth&scope=read write&resource_id=https://resource.example.com"
 ```
 
 **Authorization Code Flow (with user consent):**
@@ -163,7 +165,7 @@ curl -X POST "https://keycloak.example.com/realms/{realm}/protocol/aauth/agent/t
   -H "Signature-Key: ..." \
   -H "Signature-Input: ..." \
   -H "Signature: ..." \
-  -d "request_type=code&code=..."
+  -d "grant_type=code&code=..."
 ```
 
 ## Architecture
@@ -192,15 +194,65 @@ The extension integrates with Keycloak via:
 - **Internal APIs:** This extension uses some internal Keycloak APIs (from `server-spi-private` and `services` modules). These APIs may change in future Keycloak versions.
 - **Version Compatibility:** Tested with Keycloak 26.2.5. Compatibility with other versions is not guaranteed.
 
+## Development
 
-## Building from Source
+### Building from Source
 
 ```bash
-mvn clean package
+mvn clean install
 ```
+
+### Project Structure
+
+```
+keycloak-aauth-extension/
+├── pom.xml
+├── README.md
+└── src/
+    └── main/
+        ├── java/
+        │   └── org/keycloak/protocol/aauth/
+        │       ├── [Protocol implementation]
+        │       ├── representations/  # Token representations
+        │       └── util/             # Utility classes
+        └── resources/
+            └── META-INF/
+                ├── beans.xml         # JAX-RS configuration
+                └── services/         # SPI registrations
+```
+
+## Troubleshooting
+
+### Filter Not Working
+
+If HTTP signature verification is not working:
+
+1. Check logs for filter registration messages
+2. Verify `beans.xml` is present in the JAR
+3. Ensure `@Provider` annotation is on `AAuthSignatureFilter`
+4. Check that the filter is being called (enable debug logging)
+
+### SPI Not Registered
+
+If the protocol is not available:
+
+1. Verify JAR is in `providers/` directory
+2. Rebuild Keycloak: `./kc.sh build`
+3. Check logs for SPI registration errors
+4. Verify `META-INF/services/` files are correct
+
+### Import Errors
+
+If you see import errors:
+
+1. Ensure all representation classes are in `org.keycloak.protocol.aauth.representations` package
+2. Verify `AAuthJWKSUtils` is used instead of `JWKSUtils`
+3. Check that all imports use the correct package paths
 
 ## License
 
 Licensed under the Apache License, Version 2.0.
 
+## Support
 
+For issues and questions, please refer to the AAuth specification documentation or contact the maintainers.

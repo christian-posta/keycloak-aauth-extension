@@ -42,6 +42,8 @@ public class AAuthConfig {
     public static final String REFRESH_LIFESPAN = "aauth.refresh.lifespan";
     public static final String EXCHANGE_ENABLED = "aauth.exchange.enabled";
     public static final String EXCHANGE_MAX_DEPTH = "aauth.exchange.max.depth";
+    public static final String CONSENT_REQUIRED_SCOPES = "aauth.consent.required.scopes";
+    public static final String CONSENT_REQUIRED_SCOPE_PREFIXES = "aauth.consent.required.scope.prefixes";
 
     // Default values
     public static final int DEFAULT_TOKEN_LIFESPAN = 300; // 5 minutes
@@ -211,6 +213,68 @@ public class AAuthConfig {
             }
         }
         return true;
+    }
+
+    /**
+     * Get list of scopes that require user consent.
+     * Empty list means no scopes are configured (will use default behavior).
+     */
+    public List<String> getConsentRequiredScopes() {
+        return getJsonListAttribute(CONSENT_REQUIRED_SCOPES);
+    }
+
+    /**
+     * Get list of scope name prefixes that require user consent.
+     * Any scope whose name starts with one of these prefixes will require consent.
+     * Empty list means no prefixes are configured (will use default behavior).
+     */
+    public List<String> getConsentRequiredScopePrefixes() {
+        return getJsonListAttribute(CONSENT_REQUIRED_SCOPE_PREFIXES);
+    }
+
+    /**
+     * Check if a scope requires user consent.
+     *
+     * Behavior:
+     * - If both consent-required scopes and prefixes are empty (not configured),
+     *   uses backward-compatible defaults: openid, profile, email, and prefixes user., profile., email.
+     * - If either list is non-empty, uses only the configured lists (no defaults).
+     *
+     * @param scope the scope name to check
+     * @return true if the scope requires user consent
+     */
+    public boolean isConsentRequiredForScope(String scope) {
+        if (scope == null || scope.trim().isEmpty()) {
+            return false;
+        }
+
+        List<String> consentRequiredScopes = getConsentRequiredScopes();
+        List<String> consentRequiredPrefixes = getConsentRequiredScopePrefixes();
+
+        // If both lists are empty, use backward-compatible defaults
+        if (consentRequiredScopes.isEmpty() && consentRequiredPrefixes.isEmpty()) {
+            // Default behavior: require consent for user-specific scopes
+            return "profile".equals(scope) ||
+                   "email".equals(scope) ||
+                   "openid".equals(scope) ||
+                   scope.startsWith("user.") ||
+                   scope.startsWith("profile.") ||
+                   scope.startsWith("email.");
+        }
+
+        // Check exact match in consent-required scopes
+        if (consentRequiredScopes.contains(scope)) {
+            return true;
+        }
+
+        // Check if scope starts with any consent-required prefix
+        for (String prefix : consentRequiredPrefixes) {
+            if (scope.startsWith(prefix)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
