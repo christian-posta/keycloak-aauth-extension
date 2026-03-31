@@ -150,8 +150,7 @@ public class CodeGrantType implements OAuth2GrantType {
         AAuthTokenResponse response = new AAuthTokenResponse();
         response.setAuthToken(authToken);
         response.setExpiresIn(tokenManager.getTokenExpiration(realm));
-        response.setRefreshToken(refreshToken);
-        response.setTokenType("AAuth");
+        // refresh_token and token_type removed in updated spec
 
         logger.debugf("Exchanged code for auth token. Agent: %s, User: %s, Resource: %s",
                 agentId, user.getId(), codeData.getResourceId());

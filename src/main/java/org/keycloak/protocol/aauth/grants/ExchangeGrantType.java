@@ -98,11 +98,15 @@ public class ExchangeGrantType implements OAuth2GrantType {
                     "Agent identity not found. Request must be signed with HTTPSig.", Response.Status.UNAUTHORIZED);
         }
 
-        // Extract upstream auth token from session (set by JWTScheme when scheme=jwt)
-        String upstreamAuthTokenString = (String) session.getAttribute("aauth.upstream.auth.token");
+        // Extract upstream auth token: first try form param "upstream_token" (spec),
+        // then fall back to session attribute set by JWTScheme (legacy)
+        String upstreamAuthTokenString = context.getFormParams().getFirst("upstream_token");
+        if (upstreamAuthTokenString == null || upstreamAuthTokenString.isEmpty()) {
+            upstreamAuthTokenString = (String) session.getAttribute("aauth.upstream.auth.token");
+        }
         if (upstreamAuthTokenString == null || upstreamAuthTokenString.isEmpty()) {
             throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_REQUEST,
-                    "Missing upstream auth_token. Request must be signed with scheme=jwt containing an auth+jwt token.",
+                    "Missing upstream_token parameter or Signature-Key jwt scheme.",
                     Response.Status.BAD_REQUEST);
         }
 
@@ -191,7 +195,7 @@ public class ExchangeGrantType implements OAuth2GrantType {
             AAuthTokenResponse response = new AAuthTokenResponse();
             response.setAuthToken(newAuthToken);
             response.setExpiresIn(tokenManager.getTokenExpiration(realm));
-            response.setTokenType("AAuth");
+            // token_type removed in updated spec
 
             logger.debugf("Token exchange successful for agent: %s, resource: %s, upstream agent: %s",
                     agentId, resourceResult.getResourceId(), upstreamResult.getAgentId());

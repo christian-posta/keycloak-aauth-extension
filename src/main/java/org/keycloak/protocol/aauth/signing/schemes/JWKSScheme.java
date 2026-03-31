@@ -80,7 +80,7 @@ public class JWKSScheme implements SignatureScheme {
         } else {
             // Mode 2: Identifier + Metadata
             if (wellKnown == null) {
-                wellKnown = "aauth-agent"; // Default
+                wellKnown = "aauth-agent.json"; // Default per SPEC_UPDATED.md IANA registration
             }
 
             // Fetch agent metadata

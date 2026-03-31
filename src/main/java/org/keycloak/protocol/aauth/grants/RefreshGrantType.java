@@ -129,7 +129,7 @@ public class RefreshGrantType implements OAuth2GrantType {
             AAuthTokenResponse response = new AAuthTokenResponse();
             response.setAuthToken(newAuthToken);
             response.setExpiresIn(tokenManager.getTokenExpiration(realm));
-            response.setTokenType("AAuth");
+            // token_type removed in updated spec
 
             logger.debugf("Refreshed auth token for agent: %s, resource: %s", 
                     refreshToken.getAgent(), refreshToken.getResourceId());
