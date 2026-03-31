@@ -17,13 +17,14 @@
 
 package org.keycloak.protocol.aauth.metadata;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.List;
-
 /**
- * Agent metadata document per AAuth specification Section 8.1.
+ * Agent server metadata document per SPEC_UPDATED.md Section 13.1.
+ * Published at /.well-known/aauth-agent.json
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class AgentMetadata {
 
     @JsonProperty("agent")
@@ -32,86 +33,57 @@ public class AgentMetadata {
     @JsonProperty("jwks_uri")
     private String jwksUri;
 
-    @JsonProperty("redirect_uris")
-    private List<String> redirectUris;
-
-    @JsonProperty("name")
-    private String name;
+    @JsonProperty("client_name")
+    private String clientName;
 
     @JsonProperty("logo_uri")
     private String logoUri;
 
-    @JsonProperty("policy_uri")
-    private String policyUri;
+    @JsonProperty("logo_dark_uri")
+    private String logoDarkUri;
+
+    @JsonProperty("callback_endpoint")
+    private String callbackEndpoint;
+
+    @JsonProperty("localhost_callback_allowed")
+    private Boolean localhostCallbackAllowed;
+
+    @JsonProperty("clarification_supported")
+    private Boolean clarificationSupported;
 
     @JsonProperty("tos_uri")
     private String tosUri;
 
-    @JsonProperty("homepage")
-    private String homepage;
+    @JsonProperty("policy_uri")
+    private String policyUri;
 
-    public String getAgent() {
-        return agent;
-    }
+    public String getAgent() { return agent; }
+    public void setAgent(String agent) { this.agent = agent; }
 
-    public void setAgent(String agent) {
-        this.agent = agent;
-    }
+    public String getJwksUri() { return jwksUri; }
+    public void setJwksUri(String jwksUri) { this.jwksUri = jwksUri; }
 
-    public String getJwksUri() {
-        return jwksUri;
-    }
+    public String getClientName() { return clientName; }
+    public void setClientName(String clientName) { this.clientName = clientName; }
 
-    public void setJwksUri(String jwksUri) {
-        this.jwksUri = jwksUri;
-    }
+    public String getLogoUri() { return logoUri; }
+    public void setLogoUri(String logoUri) { this.logoUri = logoUri; }
 
-    public List<String> getRedirectUris() {
-        return redirectUris;
-    }
+    public String getLogoDarkUri() { return logoDarkUri; }
+    public void setLogoDarkUri(String logoDarkUri) { this.logoDarkUri = logoDarkUri; }
 
-    public void setRedirectUris(List<String> redirectUris) {
-        this.redirectUris = redirectUris;
-    }
+    public String getCallbackEndpoint() { return callbackEndpoint; }
+    public void setCallbackEndpoint(String callbackEndpoint) { this.callbackEndpoint = callbackEndpoint; }
 
-    public String getName() {
-        return name;
-    }
+    public Boolean getLocalhostCallbackAllowed() { return localhostCallbackAllowed; }
+    public void setLocalhostCallbackAllowed(Boolean localhostCallbackAllowed) { this.localhostCallbackAllowed = localhostCallbackAllowed; }
 
-    public void setName(String name) {
-        this.name = name;
-    }
+    public Boolean getClarificationSupported() { return clarificationSupported; }
+    public void setClarificationSupported(Boolean clarificationSupported) { this.clarificationSupported = clarificationSupported; }
 
-    public String getLogoUri() {
-        return logoUri;
-    }
+    public String getTosUri() { return tosUri; }
+    public void setTosUri(String tosUri) { this.tosUri = tosUri; }
 
-    public void setLogoUri(String logoUri) {
-        this.logoUri = logoUri;
-    }
-
-    public String getPolicyUri() {
-        return policyUri;
-    }
-
-    public void setPolicyUri(String policyUri) {
-        this.policyUri = policyUri;
-    }
-
-    public String getTosUri() {
-        return tosUri;
-    }
-
-    public void setTosUri(String tosUri) {
-        this.tosUri = tosUri;
-    }
-
-    public String getHomepage() {
-        return homepage;
-    }
-
-    public void setHomepage(String homepage) {
-        this.homepage = homepage;
-    }
+    public String getPolicyUri() { return policyUri; }
+    public void setPolicyUri(String policyUri) { this.policyUri = policyUri; }
 }
-

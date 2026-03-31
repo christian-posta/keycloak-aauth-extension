@@ -63,7 +63,7 @@ public class MetadataFetcher {
                 return null;
             }
 
-            String metadataUrl = buildWellKnownUrl(agentId, wellKnown != null ? wellKnown : "aauth-agent");
+            String metadataUrl = buildWellKnownUrl(agentId, wellKnown != null ? wellKnown : "aauth-agent.json");
             logger.debugf("Fetching agent metadata from: %s", metadataUrl);
 
             HttpClientProvider httpClient = session.getProvider(HttpClientProvider.class);
@@ -112,7 +112,7 @@ public class MetadataFetcher {
                 return null;
             }
 
-            String metadataUrl = buildWellKnownUrl(resourceId, "aauth-resource");
+            String metadataUrl = buildWellKnownUrl(resourceId, "aauth-resource.json");
             logger.debugf("Fetching resource metadata from: %s", metadataUrl);
 
             HttpClientProvider httpClient = session.getProvider(HttpClientProvider.class);

@@ -28,7 +28,7 @@ import org.keycloak.wellknown.WellKnownProviderFactory;
  */
 public class AAuthIssuerWellKnownProviderFactory implements WellKnownProviderFactory {
 
-    public static final String PROVIDER_ID = "aauth-issuer";
+    public static final String PROVIDER_ID = "aauth-issuer.json";
 
     @Override
     public WellKnownProvider create(KeycloakSession session) {
@@ -57,7 +57,7 @@ public class AAuthIssuerWellKnownProviderFactory implements WellKnownProviderFac
 
     @Override
     public String getAlias() {
-        return PROVIDER_ID;
+        return "aauth-issuer.json";
     }
 
     @Override

@@ -43,6 +43,7 @@ public class SignatureSchemeFactory {
             case "hwk":
                 return new HeaderWebKeyScheme();
                 
+            case "jwks_uri":
             case "jwks":
                 return new JWKSScheme(session);
                 

@@ -17,14 +17,17 @@
 
 package org.keycloak.protocol.aauth.metadata;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 
 import java.util.List;
 import java.util.Map;
 
 /**
- * Resource metadata document per AAuth specification Section 8.3.
+ * Resource metadata document per SPEC_UPDATED.md Section 13.3.
+ * Published at /.well-known/aauth-resource.json
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ResourceMetadata {
 
     @JsonProperty("resource")
@@ -33,53 +36,51 @@ public class ResourceMetadata {
     @JsonProperty("jwks_uri")
     private String jwksUri;
 
+    @JsonProperty("client_name")
+    private String clientName;
+
+    @JsonProperty("logo_uri")
+    private String logoUri;
+
+    @JsonProperty("logo_dark_uri")
+    private String logoDarkUri;
+
     @JsonProperty("resource_token_endpoint")
     private String resourceTokenEndpoint;
 
-    @JsonProperty("supported_scopes")
-    private List<String> supportedScopes;
+    @JsonProperty("interaction_endpoint")
+    private String interactionEndpoint;
 
     @JsonProperty("scope_descriptions")
     private Map<String, String> scopeDescriptions;
 
-    public String getResource() {
-        return resource;
-    }
+    @JsonProperty("additional_signature_components")
+    private List<String> additionalSignatureComponents;
 
-    public void setResource(String resource) {
-        this.resource = resource;
-    }
+    public String getResource() { return resource; }
+    public void setResource(String resource) { this.resource = resource; }
 
-    public String getJwksUri() {
-        return jwksUri;
-    }
+    public String getJwksUri() { return jwksUri; }
+    public void setJwksUri(String jwksUri) { this.jwksUri = jwksUri; }
 
-    public void setJwksUri(String jwksUri) {
-        this.jwksUri = jwksUri;
-    }
+    public String getClientName() { return clientName; }
+    public void setClientName(String clientName) { this.clientName = clientName; }
 
-    public String getResourceTokenEndpoint() {
-        return resourceTokenEndpoint;
-    }
+    public String getLogoUri() { return logoUri; }
+    public void setLogoUri(String logoUri) { this.logoUri = logoUri; }
 
-    public void setResourceTokenEndpoint(String resourceTokenEndpoint) {
-        this.resourceTokenEndpoint = resourceTokenEndpoint;
-    }
+    public String getLogoDarkUri() { return logoDarkUri; }
+    public void setLogoDarkUri(String logoDarkUri) { this.logoDarkUri = logoDarkUri; }
 
-    public List<String> getSupportedScopes() {
-        return supportedScopes;
-    }
+    public String getResourceTokenEndpoint() { return resourceTokenEndpoint; }
+    public void setResourceTokenEndpoint(String resourceTokenEndpoint) { this.resourceTokenEndpoint = resourceTokenEndpoint; }
 
-    public void setSupportedScopes(List<String> supportedScopes) {
-        this.supportedScopes = supportedScopes;
-    }
+    public String getInteractionEndpoint() { return interactionEndpoint; }
+    public void setInteractionEndpoint(String interactionEndpoint) { this.interactionEndpoint = interactionEndpoint; }
 
-    public Map<String, String> getScopeDescriptions() {
-        return scopeDescriptions;
-    }
+    public Map<String, String> getScopeDescriptions() { return scopeDescriptions; }
+    public void setScopeDescriptions(Map<String, String> scopeDescriptions) { this.scopeDescriptions = scopeDescriptions; }
 
-    public void setScopeDescriptions(Map<String, String> scopeDescriptions) {
-        this.scopeDescriptions = scopeDescriptions;
-    }
+    public List<String> getAdditionalSignatureComponents() { return additionalSignatureComponents; }
+    public void setAdditionalSignatureComponents(List<String> additionalSignatureComponents) { this.additionalSignatureComponents = additionalSignatureComponents; }
 }
-
