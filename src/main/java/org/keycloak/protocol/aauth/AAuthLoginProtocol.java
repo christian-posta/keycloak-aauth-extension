@@ -27,8 +27,8 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserSessionModel;
 import org.keycloak.protocol.ClientData;
 import org.keycloak.protocol.LoginProtocol;
-import org.keycloak.protocol.aauth.storage.AAuthRequestToken;
-import org.keycloak.protocol.aauth.storage.AAuthRequestTokenStore;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequest;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequestStore;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.utils.KeycloakSessionUtil;
 
@@ -39,15 +39,18 @@ import jakarta.ws.rs.core.UriInfo;
 
 /**
  * LoginProtocol implementation for AAuth.
- * 
- * Handles the post-authentication redirect back to the AAuth authorization endpoint.
+ *
+ * After user login, redirects back to the interaction endpoint using the
+ * interaction code stored in the auth session.
  */
 public class AAuthLoginProtocol implements LoginProtocol {
 
     private static final Logger logger = Logger.getLogger(AAuthLoginProtocol.class);
-    
-    private static final String REQUEST_TOKEN_PARAM = "request_token";
-    private static final String REDIRECT_URI_PARAM = "redirect_uri";
+
+    /** Auth session note keys */
+    private static final String INTERACTION_CODE_PARAM = "code";
+    private static final String PENDING_ID_PARAM = "pending_id";
+    private static final String CALLBACK_PARAM = "callback";
     private static final String STATE_PARAM = "state";
 
     private KeycloakSession session;
@@ -87,75 +90,64 @@ public class AAuthLoginProtocol implements LoginProtocol {
     }
 
     @Override
-    public Response authenticated(AuthenticationSessionModel authSession, UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
-        // Retrieve request token from authentication session
-        String requestToken = authSession.getClientNote(REQUEST_TOKEN_PARAM);
-        String redirectUri = authSession.getClientNote(REDIRECT_URI_PARAM);
+    public Response authenticated(AuthenticationSessionModel authSession,
+            UserSessionModel userSession, ClientSessionContext clientSessionCtx) {
+
+        String interactionCode = authSession.getClientNote(INTERACTION_CODE_PARAM);
+        String pendingId = authSession.getClientNote(PENDING_ID_PARAM);
+        String callbackUrl = authSession.getClientNote(CALLBACK_PARAM);
         String state = authSession.getClientNote(STATE_PARAM);
-        
-        // If request_token is not in session notes, try to extract it from state
-        // (This can happen if the auth session was recreated from ClientData)
-        if ((requestToken == null || requestToken.isEmpty()) && state != null && state.contains("|")) {
-            String[] parts = state.split("\\|", 2);
-            if (parts.length == 2) {
-                state = parts[0]; // Original state
-                requestToken = parts[1]; // Request token
-            }
-        }
-        
-        if (requestToken == null || requestToken.isEmpty()) {
-            logger.warnf("No request_token found in authentication session after login");
-            return sendError(authSession, Error.CANCELLED_BY_USER, "Missing request_token");
+
+        if (interactionCode == null && pendingId == null) {
+            logger.warn("AAuth: no interaction code or pending_id in auth session after login");
+            return sendError(authSession, Error.CANCELLED_BY_USER, "Missing interaction code");
         }
 
-        // Get session from thread context if not set via setSession()
         KeycloakSession currentSession = this.session != null ? this.session : KeycloakSessionUtil.getKeycloakSession();
         if (currentSession == null) {
-            logger.error("KeycloakSession not available for request token validation");
+            logger.error("KeycloakSession not available after login");
             return sendError(authSession, Error.CANCELLED_BY_USER, "Internal error: session not available");
         }
 
-        // Validate request token
-        AAuthRequestTokenStore tokenStore = new AAuthRequestTokenStore(currentSession);
-        AAuthRequestToken tokenData = tokenStore.validateRequestToken(requestToken);
-        
-        if (tokenData == null) {
-            logger.warnf("Invalid or expired request_token: %s", requestToken);
-            return sendError(authSession, Error.CANCELLED_BY_USER, "Invalid or expired request_token");
+        // If we only have pendingId, look up the interaction code from the pending store
+        if (interactionCode == null) {
+            AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(currentSession);
+            AAuthPendingRequest pending = pendingStore.getPendingRequest(pendingId);
+            if (pending != null) {
+                interactionCode = pending.getInteractionCode();
+            }
         }
 
-        // Use redirect_uri from token if not in session
-        if (redirectUri == null || redirectUri.isEmpty()) {
-            redirectUri = tokenData.getRedirectUri();
-        }
-
-        // Redirect back to /agent/auth to show consent screen (user is now authenticated).
-        // Do NOT generate auth code yet - the consent screen must be shown first.
-        // After user grants consent on the consent screen, AAuthAuthorizationEndpoint
-        // will generate the code and redirect to the agent.
+        // Redirect back to /interact?code=... to show consent screen
         java.net.URI baseUri = currentSession.getContext().getUri().getBaseUri();
-        UriBuilder agentAuthUri = UriBuilder.fromUri(baseUri)
-                .path("realms/{realm}/protocol/aauth/agent/auth")
-                .resolveTemplate("realm", realm.getName())
-                .queryParam(REQUEST_TOKEN_PARAM, requestToken)
-                .queryParam(REDIRECT_URI_PARAM, redirectUri);
-        if (state != null && !state.isEmpty()) {
-            agentAuthUri.queryParam(STATE_PARAM, state);
+        UriBuilder interactUri = UriBuilder.fromUri(baseUri)
+                .path("realms/{realm}/protocol/aauth/interact")
+                .resolveTemplate("realm", realm.getName());
+
+        if (interactionCode != null) {
+            interactUri.queryParam(INTERACTION_CODE_PARAM, interactionCode);
+        } else if (pendingId != null) {
+            interactUri.queryParam(PENDING_ID_PARAM, pendingId);
         }
-        
-        logger.debugf("Redirecting to consent screen (agent/auth) for agent: %s, resource: %s", 
-                tokenData.getAgentId(), tokenData.getResourceId());
-        
-        return Response.seeOther(agentAuthUri.build()).build();
+
+        if (callbackUrl != null && !callbackUrl.isEmpty()) {
+            interactUri.queryParam(CALLBACK_PARAM, callbackUrl);
+        }
+        if (state != null && !state.isEmpty()) {
+            interactUri.queryParam(STATE_PARAM, state);
+        }
+
+        logger.debugf("AAuth: redirecting to interact endpoint after login, code=%s", interactionCode);
+        return Response.seeOther(interactUri.build()).build();
     }
 
     @Override
     public Response sendError(AuthenticationSessionModel authSession, Error error, String errorMessage) {
-        String redirectUri = authSession.getClientNote(REDIRECT_URI_PARAM);
+        String callbackUrl = authSession.getClientNote(CALLBACK_PARAM);
         String state = authSession.getClientNote(STATE_PARAM);
-        
-        if (redirectUri != null) {
-            UriBuilder uriBuilder = UriBuilder.fromUri(redirectUri);
+
+        if (callbackUrl != null && !callbackUrl.isEmpty()) {
+            UriBuilder uriBuilder = UriBuilder.fromUri(callbackUrl);
             uriBuilder.queryParam("error", error.name().toLowerCase());
             if (errorMessage != null) {
                 uriBuilder.queryParam("error_description", errorMessage);
@@ -165,52 +157,38 @@ public class AAuthLoginProtocol implements LoginProtocol {
             }
             return Response.seeOther(uriBuilder.build()).build();
         }
-        
-        // Return error page if no redirect URI
+
         return Response.status(Response.Status.BAD_REQUEST)
-                .entity(String.format("{\"error\":\"%s\",\"error_description\":\"%s\"}", error.name().toLowerCase(), errorMessage))
+                .entity(String.format("{\"error\":\"%s\",\"error_description\":\"%s\"}",
+                        error.name().toLowerCase(), errorMessage))
                 .build();
     }
 
     @Override
     public ClientData getClientData(AuthenticationSessionModel authSession) {
-        // Store request_token in state field (since ClientData doesn't have a request_token field)
-        // We'll reconstruct it from the state when decoding
-        String redirectUri = authSession.getClientNote(REDIRECT_URI_PARAM);
+        String callbackUrl = authSession.getClientNote(CALLBACK_PARAM);
         String state = authSession.getClientNote(STATE_PARAM);
-        String requestToken = authSession.getClientNote(REQUEST_TOKEN_PARAM);
-        
-        // Encode request_token into state if present
-        // Format: "original_state|request_token" or just "request_token" if no state
-        String encodedState = state != null ? state + "|" + requestToken : requestToken;
-        
-        // Return proper ClientData that will be Base64Url-encoded as JSON
-        return new ClientData(redirectUri, null, null, encodedState);
+        String interactionCode = authSession.getClientNote(INTERACTION_CODE_PARAM);
+        String pendingId = authSession.getClientNote(PENDING_ID_PARAM);
+
+        // Encode interaction code + pending_id in state so we can recover them
+        String encodedState = (state != null ? state : "") + "|"
+                + (interactionCode != null ? interactionCode : "") + "|"
+                + (pendingId != null ? pendingId : "");
+
+        return new ClientData(callbackUrl, null, null, encodedState);
     }
 
     @Override
     public Response sendError(ClientModel client, ClientData clientData, Error error) {
-        // Decode client data to get redirect URI and state
-        String redirectUri = clientData != null ? clientData.getRedirectUri() : null;
-        String state = clientData != null ? clientData.getState() : null;
-        
-        // Extract original state if it contains request_token (format: "original_state|request_token")
-        if (state != null && state.contains("|")) {
-            String[] parts = state.split("\\|", 2);
-            if (parts.length == 2) {
-                state = parts[0]; // Use original state for error redirect
-            }
-        }
-        
-        if (redirectUri != null) {
-            UriBuilder uriBuilder = UriBuilder.fromUri(redirectUri);
+        String callbackUrl = clientData != null ? clientData.getRedirectUri() : null;
+
+        if (callbackUrl != null && !callbackUrl.isEmpty()) {
+            UriBuilder uriBuilder = UriBuilder.fromUri(callbackUrl);
             uriBuilder.queryParam("error", error.name().toLowerCase());
-            if (state != null && !state.isEmpty()) {
-                uriBuilder.queryParam(STATE_PARAM, state);
-            }
             return Response.seeOther(uriBuilder.build()).build();
         }
-        
+
         return Response.status(Response.Status.BAD_REQUEST)
                 .entity(String.format("{\"error\":\"%s\"}", error.name().toLowerCase()))
                 .build();
@@ -218,31 +196,24 @@ public class AAuthLoginProtocol implements LoginProtocol {
 
     @Override
     public Response backchannelLogout(UserSessionModel userSession, AuthenticatedClientSessionModel clientSession) {
-        // AAuth doesn't support backchannel logout in Phase 3
         return Response.ok().build();
     }
 
     @Override
     public Response frontchannelLogout(UserSessionModel userSession, AuthenticatedClientSessionModel clientSession) {
-        // AAuth doesn't support frontchannel logout in Phase 3
         return Response.ok().build();
     }
 
     @Override
     public Response finishBrowserLogout(UserSessionModel userSession, AuthenticationSessionModel logoutSession) {
-        // AAuth doesn't support browser logout in Phase 3
         return Response.ok().build();
     }
 
     @Override
     public boolean requireReauthentication(UserSessionModel userSession, AuthenticationSessionModel authSession) {
-        // For Phase 3, we don't require reauthentication
         return false;
     }
 
     @Override
-    public void close() {
-        // No cleanup needed
-    }
+    public void close() {}
 }
-

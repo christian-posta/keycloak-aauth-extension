@@ -31,10 +31,10 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.UserSessionModel;
+import org.keycloak.protocol.aauth.AAuthTokenManager;
 import org.keycloak.protocol.aauth.forms.AAuthConsentBean;
-import org.keycloak.protocol.aauth.storage.AAuthAuthorizationCode;
-import org.keycloak.protocol.aauth.storage.AAuthRequestToken;
-import org.keycloak.protocol.aauth.storage.AAuthRequestTokenStore;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequest;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequestStore;
 import org.keycloak.services.ErrorPageException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.managers.AuthenticationManager;
@@ -47,8 +47,8 @@ import org.keycloak.theme.beans.LocaleBean;
 import org.keycloak.theme.beans.MessageFormatterMethod;
 import org.keycloak.theme.freemarker.FreeMarkerProvider;
 import org.keycloak.models.utils.SystemClientUtil;
-import org.keycloak.utils.MediaType;
 import org.keycloak.util.TokenUtil;
+import org.keycloak.utils.MediaType;
 
 import java.util.Arrays;
 import java.util.Collections;
@@ -59,6 +59,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 import jakarta.ws.rs.Consumes;
@@ -70,28 +71,35 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriBuilder;
 
 import java.net.URI;
-import java.util.UUID;
 
 /**
- * Authorization endpoint for AAuth user consent flow.
+ * Interaction endpoint for AAuth user consent flow.
  *
- * Handles user authentication and consent for AAuth authorization requests.
- * Similar to OIDC AuthorizationEndpoint but for AAuth protocol.
+ * Updated per AAuth spec: accepts an interaction code (not a request_token).
+ * After user consent, the pending request is completed (auth token stored in
+ * the pending store) and the user is redirected to the callback URL.
+ * The agent retrieves the auth token by polling GET /pending/{id}.
+ *
+ * Paths:
+ *   GET  /interact?code=ABCD1234[&callback=https://...]  (primary)
+ *   GET  /agent/auth?code=ABCD1234[&callback=https://...]  (legacy alias)
+ *   POST /interact/consent                               (consent form submission)
+ *   POST /agent/auth/consent                             (legacy alias)
  */
 public class AAuthAuthorizationEndpoint {
 
     private static final Logger logger = Logger.getLogger(AAuthAuthorizationEndpoint.class);
 
-    private static final String REQUEST_TOKEN_PARAM = "request_token";
-    private static final String REDIRECT_URI_PARAM = "redirect_uri";
+    private static final String INTERACTION_CODE_PARAM = "code";
+    private static final String CALLBACK_PARAM = "callback";
     private static final String STATE_PARAM = "state";
-    private static final String CODE_PARAM = "code";
-    private static final String ERROR_PARAM = "error";
-    private static final String ERROR_DESCRIPTION_PARAM = "error_description";
     private static final String PROMPT_PARAM = "prompt";
     private static final String PROMPT_CONSENT = "consent";
 
-    /** Session note prefix for AAuth consent: key is aauth.consent.{agentId}|{resourceId}, value is comma-separated scopes. */
+    // Legacy param names (kept for the AAuthLoginProtocol redirect path)
+    private static final String PENDING_ID_PARAM = "pending_id";
+
+    /** Session note prefix for AAuth consent: key is aauth.consent.{agentId}|{resourceId} */
     private static final String SESSION_NOTE_AAUTH_CONSENT_PREFIX = "aauth.consent.";
 
     private final KeycloakSession session;
@@ -109,14 +117,14 @@ public class AAuthAuthorizationEndpoint {
     @GET
     public Response authorizeGet() {
         MultivaluedMap<String, String> params = session.getContext().getUri().getQueryParameters();
-        return processAuthorization(params);
+        return processInteraction(params);
     }
 
     @POST
     @Consumes(jakarta.ws.rs.core.MediaType.APPLICATION_FORM_URLENCODED)
     public Response authorizePost() {
         MultivaluedMap<String, String> params = session.getContext().getHttpRequest().getDecodedFormParameters();
-        return processAuthorization(params);
+        return processInteraction(params);
     }
 
     @Path("consent")
@@ -146,81 +154,179 @@ public class AAuthAuthorizationEndpoint {
                     "Invalid or expired consent code");
         }
 
-        String requestTokenId = consentData.get("request_token_id");
-        String redirectUri = consentData.get("redirect_uri");
+        String pendingRequestId = consentData.get("pending_request_id");
+        String callbackUrl = consentData.get("callback_url");
         String state = consentData.get("state");
         String userSessionId = consentData.get("user_session_id");
 
         if (!isAccept) {
-            // User denied - redirect with error
+            // User denied
             event.error(org.keycloak.events.Errors.REJECTED_BY_USER);
-            return redirectWithError(redirectUri, "access_denied",
-                    "User denied the authorization request", state);
+            AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(session);
+            pendingStore.denyPendingRequest(pendingRequestId, "access_denied",
+                    "User denied the authorization request");
+            return showDeniedPage(callbackUrl);
         }
 
-        // User accepted - retrieve request token and generate code
-        AAuthRequestTokenStore tokenStore = new AAuthRequestTokenStore(session);
-        AAuthRequestToken tokenData = tokenStore.getRequestTokenById(requestTokenId);
+        // Retrieve pending request
+        AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(session);
+        AAuthPendingRequest pending = pendingStore.getPendingRequest(pendingRequestId);
 
-        if (tokenData == null) {
-            return createErrorResponse(redirectUri, OAuthErrorException.INVALID_REQUEST,
-                    "Request token expired");
+        if (pending == null) {
+            return createErrorResponse(null, OAuthErrorException.INVALID_REQUEST,
+                    "Pending request expired or not found");
         }
 
-        // Retrieve user session from stored ID
+        // Retrieve user session
         UserSessionModel userSession = null;
         if (userSessionId != null) {
             userSession = session.sessions().getUserSession(realm, userSessionId);
         }
         if (userSession == null) {
-            // Fallback: try to get from SSO cookie
-            AuthenticationManager.AuthResult authResult = AuthenticationManager.authenticateIdentityCookie(session, realm, true);
+            AuthenticationManager.AuthResult authResult =
+                    AuthenticationManager.authenticateIdentityCookie(session, realm, true);
             if (authResult != null) {
                 userSession = authResult.getSession();
             }
         }
         if (userSession == null) {
-            return createErrorResponse(redirectUri, OAuthErrorException.INVALID_REQUEST,
+            return createErrorResponse(null, OAuthErrorException.INVALID_REQUEST,
                     "User session not found or expired");
         }
 
-        // Record consent in session so we can skip the consent screen on subsequent requests this session
-        addSessionConsent(userSession, tokenData.getAgentId(), tokenData.getResourceId(), tokenData.getScope());
+        UserModel user = userSession.getUser();
 
-        String code = generateAuthorizationCode(tokenData, userSession);
+        // Record consent in session
+        addSessionConsent(userSession, pending.getAgentId(), pending.getResourceId(), pending.getScope());
 
-        event.event(EventType.CODE_TO_TOKEN);
-        event.detail(Details.CONSENT, Details.CONSENT_VALUE_CONSENT_GRANTED);
-        event.detail(Details.CODE_ID, code);
-        event.success();
+        // Build the auth token and complete the pending request
+        try {
+            java.security.PublicKey agentPublicKey = resolveAgentPublicKey(pending.getAgentJkt());
+            if (agentPublicKey == null) {
+                return createErrorResponse(null, OAuthErrorException.SERVER_ERROR,
+                        "Cannot resolve agent public key");
+            }
 
-        return redirectWithCode(redirectUri, code, state);
+            AAuthTokenManager tokenManager = new AAuthTokenManager(session);
+            String authToken = tokenManager.createAuthToken(realm, pending.getAgentId(), null,
+                    agentPublicKey, pending.getResourceId(), pending.getScope(), user);
+
+            long expiresIn = tokenManager.getTokenExpiration(realm);
+            pendingStore.completePendingRequest(pendingRequestId, authToken, expiresIn);
+
+            event.event(EventType.LOGIN);
+            event.detail(Details.CONSENT, Details.CONSENT_VALUE_CONSENT_GRANTED);
+            event.success();
+
+            logger.infof("AAuth consent granted: pending=%s agent=%s user=%s",
+                    pendingRequestId, pending.getAgentId(), user.getUsername());
+        } catch (Exception e) {
+            logger.errorf(e, "Failed to create auth token after consent");
+            pendingStore.denyPendingRequest(pendingRequestId, "server_error",
+                    "Failed to create auth token");
+            return createErrorResponse(null, OAuthErrorException.SERVER_ERROR,
+                    "Failed to create auth token");
+        }
+
+        // Redirect to callback (no token/code in redirect — agent polls pending URL)
+        return redirectToCallback(callbackUrl, state);
     }
 
+    /**
+     * User submits a clarification question to forward to the agent.
+     * Form params: pending_request_id, interaction_code, clarification_question, callback_url, state
+     */
+    @Path("clarify")
+    @POST
+    @Consumes(jakarta.ws.rs.core.MediaType.APPLICATION_FORM_URLENCODED)
+    public Response processClarify() {
+        checkSsl();
+        checkRealm();
 
-    private Response processAuthorization(MultivaluedMap<String, String> params) {
+        MultivaluedMap<String, String> formData = session.getContext()
+                .getHttpRequest().getDecodedFormParameters();
+
+        String pendingRequestId = formData.getFirst("pending_request_id");
+        String interactionCode = formData.getFirst("interaction_code");
+        String question = formData.getFirst("clarification_question");
+        String callbackUrl = formData.getFirst("callback_url");
+        String state = formData.getFirst("state");
+
+        if (pendingRequestId == null || pendingRequestId.isEmpty()) {
+            return showErrorPage("Missing required parameter: pending_request_id");
+        }
+        if (question == null || question.trim().isEmpty()) {
+            return showErrorPage("Clarification question cannot be empty");
+        }
+
+        // Verify user is authenticated
+        AuthenticationManager.AuthResult authResult =
+                AuthenticationManager.authenticateIdentityCookie(session, realm, true);
+        if (authResult == null || authResult.getSession() == null) {
+            return showErrorPage("User session not found. Please log in again.");
+        }
+
+        AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(session);
+        AAuthPendingRequest pending = pendingStore.getPendingRequest(pendingRequestId);
+        if (pending == null) {
+            return showErrorPage("Pending request not found or expired");
+        }
+        if (!pending.isClarificationEnabled()) {
+            return showErrorPage("Clarification is not enabled for this request");
+        }
+
+        pendingStore.setClarificationQuestion(pendingRequestId, question.trim());
+
+        logger.infof("AAuth clarify: stored question for pending=%s, agent=%s", pendingRequestId, pending.getAgentId());
+
+        // Redirect back to interact page to show "waiting" state
+        try {
+            UriBuilder uriBuilder = UriBuilder.fromUri(
+                    session.getContext().getUri().getBaseUri())
+                    .path("realms").path(realm.getName()).path("protocol/aauth/interact");
+            if (interactionCode != null && !interactionCode.isEmpty()) {
+                uriBuilder.queryParam("code", interactionCode);
+            }
+            if (callbackUrl != null && !callbackUrl.isEmpty()) {
+                uriBuilder.queryParam("callback", callbackUrl);
+            }
+            if (state != null && !state.isEmpty()) {
+                uriBuilder.queryParam("state", state);
+            }
+            return Response.seeOther(uriBuilder.build()).build();
+        } catch (Exception e) {
+            logger.warnf(e, "Failed to build redirect URI after clarify");
+            return showErrorPage("Failed to redirect after clarification submission");
+        }
+    }
+
+    private Response processInteraction(MultivaluedMap<String, String> params) {
         event.event(EventType.LOGIN);
 
         checkSsl();
         checkRealm();
 
-        String requestToken = params.getFirst(REQUEST_TOKEN_PARAM);
-        String redirectUri = params.getFirst(REDIRECT_URI_PARAM);
+        String interactionCode = params.getFirst(INTERACTION_CODE_PARAM);
+        String callbackUrl = params.getFirst(CALLBACK_PARAM);
         String state = params.getFirst(STATE_PARAM);
 
-        // If request_token not in params, try to get it from authentication session (return from login)
-        if (requestToken == null || requestToken.isEmpty()) {
+        // Support legacy pending_id param (from AAuthLoginProtocol redirect)
+        String pendingId = params.getFirst(PENDING_ID_PARAM);
+
+        // Try to get from authentication session if returning from login
+        if (interactionCode == null && pendingId == null) {
             AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);
-            RootAuthenticationSessionModel rootAuthSession = authSessionManager.getCurrentRootAuthenticationSession(realm);
+            RootAuthenticationSessionModel rootAuthSession =
+                    authSessionManager.getCurrentRootAuthenticationSession(realm);
             if (rootAuthSession != null) {
                 ClientModel client = SystemClientUtil.getSystemClient(realm);
-                // Get authentication session for the client (there should be only one)
                 Map<String, AuthenticationSessionModel> authSessions = rootAuthSession.getAuthenticationSessions();
                 for (AuthenticationSessionModel authSession : authSessions.values()) {
                     if (client.equals(authSession.getClient())) {
-                        requestToken = authSession.getClientNote(REQUEST_TOKEN_PARAM);
-                        if (redirectUri == null) {
-                            redirectUri = authSession.getClientNote(REDIRECT_URI_PARAM);
+                        interactionCode = authSession.getClientNote(INTERACTION_CODE_PARAM);
+                        pendingId = authSession.getClientNote(PENDING_ID_PARAM);
+                        if (callbackUrl == null) {
+                            callbackUrl = authSession.getClientNote(CALLBACK_PARAM);
                         }
                         if (state == null) {
                             state = authSession.getClientNote(STATE_PARAM);
@@ -231,95 +337,159 @@ public class AAuthAuthorizationEndpoint {
             }
         }
 
-        if (requestToken == null || requestToken.isEmpty()) {
-            logger.warn("AAuth consent flow: Missing request_token parameter");
-            return createErrorResponse(redirectUri, OAuthErrorException.INVALID_REQUEST,
-                    "Missing required parameter: request_token");
+        // Resolve the pending request
+        AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(session);
+        AAuthPendingRequest pending = null;
+
+        if (interactionCode != null && !interactionCode.isEmpty()) {
+            pending = pendingStore.getByInteractionCode(interactionCode);
+            if (pending == null) {
+                logger.warn("AAuth interaction: invalid or expired interaction code: " + interactionCode);
+                return showErrorPage("Invalid or expired interaction code");
+            }
+        } else if (pendingId != null && !pendingId.isEmpty()) {
+            pending = pendingStore.getPendingRequest(pendingId);
+            if (pending == null) {
+                logger.warn("AAuth interaction: pending request not found: " + pendingId);
+                return showErrorPage("Pending request not found or expired");
+            }
+            interactionCode = pending.getInteractionCode();
+        } else {
+            logger.warn("AAuth interaction: missing code parameter");
+            return showErrorPage("Missing required parameter: code");
         }
 
-        logger.infof("AAuth consent flow: Validating request_token (redirect_uri=%s)", redirectUri != null ? "present" : "from token");
-
-        // Validate request token
-        AAuthRequestTokenStore tokenStore = new AAuthRequestTokenStore(session);
-        AAuthRequestToken tokenData = tokenStore.validateRequestToken(requestToken);
-
-        if (tokenData == null) {
-            logger.warn("AAuth consent flow: Invalid or expired request_token");
-            return createErrorResponse(redirectUri, OAuthErrorException.INVALID_REQUEST,
-                    "Invalid or expired request_token");
+        if (callbackUrl == null) {
+            callbackUrl = pending.getCallbackUrl();
         }
 
-        // Use redirect_uri from token if not provided in request
-        if (redirectUri == null || redirectUri.isEmpty()) {
-            redirectUri = tokenData.getRedirectUri();
-        } else if (!redirectUri.equals(tokenData.getRedirectUri())) {
-            return createErrorResponse(tokenData.getRedirectUri(), OAuthErrorException.INVALID_REQUEST,
-                    "redirect_uri mismatch");
-        }
-
-        // Check if user is authenticated by looking up existing session from SSO cookie
-        // This finds users already logged in via OIDC or any other protocol
-        AuthenticationManager.AuthResult authResult = AuthenticationManager.authenticateIdentityCookie(session, realm, true);
+        // Check if user is authenticated via SSO cookie
+        AuthenticationManager.AuthResult authResult =
+                AuthenticationManager.authenticateIdentityCookie(session, realm, true);
 
         if (authResult == null || authResult.getSession() == null) {
-            // User not authenticated - redirect to login
-            logger.infof("AAuth consent flow: User not authenticated (no SSO cookie), redirecting to login (agent=%s)", tokenData.getAgentId());
-            return redirectToLogin(requestToken, redirectUri, state);
+            logger.infof("AAuth interaction: user not authenticated, redirecting to login (code=%s)", interactionCode);
+            return redirectToLogin(interactionCode, pending.getId(), callbackUrl, state);
         }
 
         UserSessionModel userSession = authResult.getSession();
         UserModel user = authResult.getUser();
 
-        // If user already consented to this agent+resource+scopes this session, skip consent screen (unless prompt=consent)
+        // Skip consent screen if user already consented this session (unless prompt=consent)
+        // Never skip for clarification-enabled requests — they always require deliberate interaction
         String prompt = params.getFirst(PROMPT_PARAM);
-        if (!TokenUtil.hasPrompt(prompt, PROMPT_CONSENT)
-                && hasSessionConsent(userSession, tokenData.getAgentId(), tokenData.getResourceId(), tokenData.getScope())) {
+        if (!pending.isClarificationEnabled()
+                && !TokenUtil.hasPrompt(prompt, PROMPT_CONSENT)
+                && hasSessionConsent(userSession, pending.getAgentId(), pending.getResourceId(), pending.getScope())) {
             event.detail(Details.CONSENT, Details.CONSENT_VALUE_PERSISTED_CONSENT);
-            String code = generateAuthorizationCode(tokenData, userSession);
-            event.event(EventType.CODE_TO_TOKEN);
-            event.detail(Details.CODE_ID, code);
-            event.success();
-            logger.infof("AAuth consent flow: Skipping consent screen (already consented this session) agent=%s resource=%s user=%s",
-                    tokenData.getAgentId(), tokenData.getResourceId(), user.getUsername());
-            return redirectWithCode(redirectUri, code, state);
+            return completeConsentAndRedirect(pending, userSession, user, callbackUrl, state, pendingStore);
         }
 
-        // User is authenticated - show consent screen
-        logger.infof("AAuth consent flow: User authenticated via SSO cookie, showing consent screen (agent=%s, resource=%s, user=%s)",
-                tokenData.getAgentId(), tokenData.getResourceId(), user.getUsername());
-        return showConsentScreen(tokenData, user, userSession);
+        // Show consent screen
+        logger.infof("AAuth interaction: showing consent screen for agent=%s, resource=%s, user=%s",
+                pending.getAgentId(), pending.getResourceId(), user.getUsername());
+        return showConsentScreen(pending, user, userSession, callbackUrl, state);
     }
 
-    private Response redirectToLogin(String requestToken, String redirectUri, String state) {
-        // Create authentication session for login flow
-        // Use system client since AAuth doesn't use traditional OIDC clients
+    private Response completeConsentAndRedirect(AAuthPendingRequest pending, UserSessionModel userSession,
+            UserModel user, String callbackUrl, String state, AAuthPendingRequestStore pendingStore) {
+        try {
+            java.security.PublicKey agentPublicKey = resolveAgentPublicKey(pending.getAgentJkt());
+            if (agentPublicKey == null) {
+                return showErrorPage("Cannot resolve agent public key");
+            }
+
+            addSessionConsent(userSession, pending.getAgentId(), pending.getResourceId(), pending.getScope());
+
+            AAuthTokenManager tokenManager = new AAuthTokenManager(session);
+            String authToken = tokenManager.createAuthToken(realm, pending.getAgentId(), null,
+                    agentPublicKey, pending.getResourceId(), pending.getScope(), user);
+
+            long expiresIn = tokenManager.getTokenExpiration(realm);
+            pendingStore.completePendingRequest(pending.getId(), authToken, expiresIn);
+
+            logger.infof("AAuth: auto-completed consent for agent=%s user=%s (session consent)",
+                    pending.getAgentId(), user.getUsername());
+
+            return redirectToCallback(callbackUrl, state);
+        } catch (Exception e) {
+            logger.errorf(e, "Failed to auto-complete consent");
+            return showErrorPage("Failed to complete authorization");
+        }
+    }
+
+    /**
+     * Resolve agent's public key from JKT. We stored it in the pending request's agentJkt,
+     * but we need the actual public key to create the auth token.
+     * Since we don't persist public keys, we attempt to get it from the current session.
+     * If the request is coming from the user's browser (not agent), it won't have the key,
+     * so we fall back to building a placeholder-free token using the stored JKT approach.
+     *
+     * Note: In the interaction flow, the user's browser hits this endpoint without signing.
+     * The public key needs to come from the pending request's stored state. Since we only
+     * stored the JKT (thumbprint), not the full key, we need to store the serialized key too.
+     *
+     * Workaround: Store the serialized public key JWK in the pending request at creation time.
+     */
+    private java.security.PublicKey resolveAgentPublicKey(String agentJkt) {
+        // The agent public key is stored in the pending request's stored data
+        // We need to look it up from the store using the JKT as index.
+        // For now, check if it's in the current session (agent signed the token endpoint request)
+        java.security.PublicKey key = (java.security.PublicKey) session.getAttribute("aauth.agent.public.key");
+        if (key != null) return key;
+
+        // Key not available in session (browser request, not agent request).
+        // Retrieve from pending request store by JKT.
+        if (agentJkt == null) return null;
+
+        // We need to look up the stored public key JWK from the pending request.
+        // The AAuthPendingRequestStore and AAuthPendingRequest store only the JKT.
+        // We need to also store the serialized JWK. This is handled by storing
+        // "agent_public_key_jwk" in the pending request when it is created.
+        // For compatibility, check the store for the key JWK.
+        Map<String, String> keyData = session.singleUseObjects().get("aauth.agentkey." + agentJkt);
+        if (keyData != null) {
+            String jwkJson = keyData.get("jwk");
+            if (jwkJson != null) {
+                try {
+                    org.keycloak.jose.jwk.JWK jwk = org.keycloak.util.JsonSerialization.readValue(jwkJson, org.keycloak.jose.jwk.JWK.class);
+                    return org.keycloak.jose.jwk.JWKParser.create(jwk).toPublicKey();
+                } catch (Exception e) {
+                    logger.warnf(e, "Failed to deserialize agent public key JWK");
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private Response redirectToLogin(String interactionCode, String pendingId, String callbackUrl, String state) {
         ClientModel client = SystemClientUtil.getSystemClient(realm);
 
-        // Create root authentication session with browser cookie
         AuthenticationSessionManager authSessionManager = new AuthenticationSessionManager(session);
-        RootAuthenticationSessionModel rootAuthSession = authSessionManager.createAuthenticationSession(realm, true);
+        RootAuthenticationSessionModel rootAuthSession =
+                authSessionManager.createAuthenticationSession(realm, true);
 
-        // Create authentication session for the client
         AuthenticationSessionModel authSession = rootAuthSession.createAuthenticationSession(client);
         authSession.setAction(AuthenticationSessionModel.Action.AUTHENTICATE.name());
-        // Use "aauth" protocol so our AAuthLoginProtocol handles the post-authentication redirect
         authSession.setProtocol("aauth");
 
-        // Store request token and redirect URI in authentication session
         URI currentUri = session.getContext().getUri().getRequestUri();
         authSession.setRedirectUri(currentUri.toString());
-        authSession.setClientNote(REQUEST_TOKEN_PARAM, requestToken);
-        if (redirectUri != null) {
-            authSession.setClientNote(REDIRECT_URI_PARAM, redirectUri);
+        if (interactionCode != null) {
+            authSession.setClientNote(INTERACTION_CODE_PARAM, interactionCode);
+        }
+        if (pendingId != null) {
+            authSession.setClientNote(PENDING_ID_PARAM, pendingId);
+        }
+        if (callbackUrl != null) {
+            authSession.setClientNote(CALLBACK_PARAM, callbackUrl);
         }
         if (state != null) {
             authSession.setClientNote(STATE_PARAM, state);
         }
 
-        // Build login URL - Keycloak will automatically use the authentication session cookie
         URI loginUrl = Urls.realmLoginPage(session.getContext().getUri().getBaseUri(), realm.getName());
-
-        // Add tab_id parameter to link to the authentication session
         UriBuilder loginUriBuilder = UriBuilder.fromUri(loginUrl);
         loginUriBuilder.queryParam("client_id", client.getClientId());
         loginUriBuilder.queryParam("tab_id", authSession.getTabId());
@@ -327,24 +497,23 @@ public class AAuthAuthorizationEndpoint {
         return Response.seeOther(loginUriBuilder.build()).build();
     }
 
-    private Response showConsentScreen(AAuthRequestToken tokenData, UserModel user, UserSessionModel userSession) {
+    private Response showConsentScreen(AAuthPendingRequest pending, UserModel user,
+            UserSessionModel userSession, String callbackUrl, String state) {
         try {
-            // 1. Create one-time consent code and store request_token_id + user session id
+            // Create one-time consent code
             String consentCode = UUID.randomUUID().toString();
             Map<String, String> consentData = new HashMap<>();
-            consentData.put("request_token_id", tokenData.getId());
-            consentData.put("redirect_uri", tokenData.getRedirectUri());
-            consentData.put("user_session_id", userSession.getId()); // Store user session for code generation
-            if (tokenData.getState() != null) {
-                consentData.put("state", tokenData.getState());
+            consentData.put("pending_request_id", pending.getId());
+            consentData.put("callback_url", callbackUrl != null ? callbackUrl : "");
+            consentData.put("user_session_id", userSession.getId());
+            if (state != null) {
+                consentData.put("state", state);
             }
-            session.singleUseObjects().put(consentCode, 600, consentData); // 10 min TTL
+            session.singleUseObjects().put(consentCode, 600, consentData);
 
-            // 2. Get theme and FreeMarker provider
             Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
             FreeMarkerProvider freeMarker = session.getProvider(FreeMarkerProvider.class);
 
-            // 3. Setup attributes (following KeycloakErrorHandler pattern)
             Locale locale = session.getContext().resolveLocale(user);
             Properties messagesBundle = theme.getEnhancedMessages(realm, locale);
             Map<String, Object> attributes = new HashMap<>();
@@ -358,161 +527,143 @@ public class AAuthAuthorizationEndpoint {
             attributes.put("advancedMsg", new AdvancedMessageFormatterMethod(locale, messagesBundle));
             Properties themeProperties = theme.getProperties();
             attributes.put("properties", themeProperties);
-            // darkMode required by keycloak.v2 template.ftl registrationLayout macro
             attributes.put("darkMode", "true".equals(themeProperties.getProperty("darkMode"))
                     && Boolean.TRUE.equals(realm.getAttribute("darkMode", true)));
-            // pageId is derived from template name (without .ftl extension)
             attributes.put("pageId", "aauth-grant");
 
-            // 4. Add AAuth-specific bean
-            String consentActionUrl = session.getContext().getUri().getBaseUri()
-                    + "realms/" + realm.getName() + "/protocol/aauth/agent/auth/consent";
-            List<String> scopes = tokenData.getScope() != null && !tokenData.getScope().trim().isEmpty()
-                    ? Arrays.asList(tokenData.getScope().split("\\s+"))
+            String baseUri = session.getContext().getUri().getBaseUri().toString();
+            String consentActionUrl = baseUri + "realms/" + realm.getName() + "/protocol/aauth/interact/consent";
+            String clarifyActionUrl = baseUri + "realms/" + realm.getName() + "/protocol/aauth/interact/clarify";
+            List<String> scopes = pending.getScope() != null && !pending.getScope().trim().isEmpty()
+                    ? Arrays.asList(pending.getScope().split("\\s+"))
                     : Collections.emptyList();
 
-            attributes.put("aauth", new AAuthConsentBean(
-                    consentCode, tokenData.getAgentId(), tokenData.getResourceId(),
-                    scopes, consentActionUrl));
+            AAuthConsentBean consentBean = new AAuthConsentBean(
+                    consentCode, pending.getAgentId(), pending.getResourceId(),
+                    scopes, consentActionUrl);
+            consentBean.setClarificationEnabled(pending.isClarificationEnabled());
+            consentBean.setClarification(pending.getClarification());
+            consentBean.setClarificationResponse(pending.getClarificationResponse());
+            consentBean.setPendingRequestId(pending.getId());
+            consentBean.setInteractionCode(pending.getInteractionCode());
+            consentBean.setCallbackUrl(callbackUrl != null ? callbackUrl : "");
+            consentBean.setState(state != null ? state : "");
+            consentBean.setClarifyActionUrl(clarifyActionUrl);
 
-            // 5. Render template
-            logger.infof("AAuth consent flow: Rendering consent template login-aauth-grant.ftl for theme=%s", theme.getName());
+            // Build a refresh URL so the "waiting" state can reload the consent screen
+            UriBuilder refreshUriBuilder = UriBuilder.fromUri(session.getContext().getUri().getBaseUri())
+                    .path("realms").path(realm.getName()).path("protocol/aauth/interact");
+            if (pending.getInteractionCode() != null) {
+                refreshUriBuilder.queryParam("code", pending.getInteractionCode());
+            }
+            if (callbackUrl != null && !callbackUrl.isEmpty()) {
+                refreshUriBuilder.queryParam("callback", callbackUrl);
+            }
+            if (state != null && !state.isEmpty()) {
+                refreshUriBuilder.queryParam("state", state);
+            }
+            consentBean.setRefreshUrl(refreshUriBuilder.build().toString());
+            attributes.put("aauth", consentBean);
+
+            logger.infof("AAuth interaction: rendering consent screen for theme=%s", theme.getName());
             String content = freeMarker.processTemplate(attributes, "login-aauth-grant.ftl", theme);
             return Response.ok(content).type(MediaType.TEXT_HTML_UTF_8_TYPE).build();
         } catch (Throwable t) {
-            logger.error("AAuth consent flow: Failed to render consent screen", t);
-            return createErrorResponse(tokenData.getRedirectUri(), OAuthErrorException.SERVER_ERROR,
-                    "Failed to render consent screen");
+            logger.error("AAuth interaction: failed to render consent screen", t);
+            return showErrorPage("Failed to render consent screen");
         }
     }
 
-    private String generateAuthorizationCode(AAuthRequestToken tokenData, UserSessionModel userSession) {
-        String codeId = UUID.randomUUID().toString();
-        int codeLifespan = 60; // 60 seconds default
-
-        // Create AAuth authorization code with request token data
-        AAuthAuthorizationCode codeData = new AAuthAuthorizationCode(
-                codeId,
-                Time.currentTime() + codeLifespan,
-                tokenData.getScope(),
-                tokenData.getRedirectUri(),
-                userSession.getId(),
-                tokenData.getId(), // request token ID
-                tokenData.getAgentId(),
-                tokenData.getAgentJkt(),
-                tokenData.getSignatureScheme(),
-                tokenData.getResourceId()
-        );
-
-        // Store code in SingleUseObjectProvider
-        session.singleUseObjects().put(codeId, codeLifespan, codeData.serialize());
-
-        // Return opaque code: {codeId}.{userSessionId}.{hash}
-        String hash = org.keycloak.common.util.Base64Url.encode((codeId + ":" + userSession.getId()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-        return codeId + "." + userSession.getId() + "." + hash;
+    private Response redirectToCallback(String callbackUrl, String state) {
+        if (callbackUrl == null || callbackUrl.isEmpty()) {
+            return showCompletionPage();
+        }
+        try {
+            UriBuilder uriBuilder = UriBuilder.fromUri(callbackUrl);
+            if (state != null) {
+                uriBuilder.queryParam(STATE_PARAM, state);
+            }
+            return Response.seeOther(uriBuilder.build()).build();
+        } catch (Exception e) {
+            logger.warnf(e, "Invalid callback URL: %s", callbackUrl);
+            return showCompletionPage();
+        }
     }
 
-    private Response redirectWithCode(String redirectUri, String code, String state) {
-        UriBuilder uriBuilder = UriBuilder.fromUri(redirectUri);
-        uriBuilder.queryParam(CODE_PARAM, code);
-        if (state != null) {
-            uriBuilder.queryParam(STATE_PARAM, state);
-        }
-
-        return Response.seeOther(uriBuilder.build()).build();
-    }
-
-    private Response redirectWithError(String redirectUri, String error, String errorDescription, String state) {
-        UriBuilder uriBuilder = UriBuilder.fromUri(redirectUri);
-        uriBuilder.queryParam(ERROR_PARAM, error);
-        if (errorDescription != null) {
-            uriBuilder.queryParam(ERROR_DESCRIPTION_PARAM, errorDescription);
-        }
-        if (state != null) {
-            uriBuilder.queryParam(STATE_PARAM, state);
-        }
-
-        return Response.seeOther(uriBuilder.build()).build();
-    }
-
-    private Response createErrorResponse(String redirectUri, String error, String errorDescription) {
-        if (redirectUri != null) {
-            return redirectWithError(redirectUri, error, errorDescription, null);
-        }
-
-        // Return JSON error response
-        return Response.status(Response.Status.BAD_REQUEST)
-                .entity(String.format("{\"error\":\"%s\",\"error_description\":\"%s\"}", error, errorDescription))
-                .type(MediaType.APPLICATION_JSON_TYPE)
+    private Response showCompletionPage() {
+        return Response.ok(
+                "<html><body><h2>Authorization Complete</h2>"
+                + "<p>You may close this window. The agent has been authorized.</p></body></html>")
+                .type(MediaType.TEXT_HTML_UTF_8_TYPE)
                 .build();
     }
 
-    private String extractRequestTokenId(String requestToken) {
-        if (requestToken == null) {
-            return null;
+    private Response showDeniedPage(String callbackUrl) {
+        if (callbackUrl != null && !callbackUrl.isEmpty()) {
+            try {
+                URI uri = UriBuilder.fromUri(callbackUrl)
+                        .queryParam("error", "access_denied").build();
+                return Response.seeOther(uri).build();
+            } catch (Exception ignore) {}
         }
-        String[] parts = requestToken.split("\\.", 3);
-        return parts.length > 0 ? parts[0] : requestToken;
+        return Response.ok(
+                "<html><body><h2>Authorization Denied</h2>"
+                + "<p>You denied the authorization request.</p></body></html>")
+                .type(MediaType.TEXT_HTML_UTF_8_TYPE)
+                .build();
     }
 
-    /**
-     * Session note key for AAuth consent: one key per (agentId, resourceId).
-     * Value is comma-separated list of consented scope names.
-     */
+    private Response showErrorPage(String message) {
+        return Response.status(Response.Status.BAD_REQUEST)
+                .entity("<html><body><h2>Error</h2><p>" + escapeHtml(message) + "</p></body></html>")
+                .type(MediaType.TEXT_HTML_UTF_8_TYPE)
+                .build();
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+    }
+
+    private Response createErrorResponse(String redirectUrl, String error, String errorDescription) {
+        return Response.status(Response.Status.BAD_REQUEST)
+                .entity(String.format("{\"error\":\"%s\",\"error_description\":\"%s\"}",
+                        error, errorDescription))
+                .type(jakarta.ws.rs.core.MediaType.APPLICATION_JSON)
+                .build();
+    }
+
     private static String consentNoteKey(String agentId, String resourceId) {
         return SESSION_NOTE_AAUTH_CONSENT_PREFIX + agentId + "|" + resourceId;
     }
 
-    /**
-     * Record that the user has consented to the given agent, resource, and scopes for this session.
-     * Merges with any existing consent for the same agent+resource (adds new scopes).
-     */
-    private void addSessionConsent(UserSessionModel userSession, String agentId, String resourceId, String scopeString) {
-        if (agentId == null || resourceId == null) {
-            return;
-        }
+    private void addSessionConsent(UserSessionModel userSession, String agentId,
+            String resourceId, String scopeString) {
+        if (agentId == null || resourceId == null) return;
         Set<String> scopes = parseScopes(scopeString);
-        if (scopes.isEmpty()) {
-            return;
-        }
+        if (scopes.isEmpty()) return;
         String key = consentNoteKey(agentId, resourceId);
         String existing = userSession.getNote(key);
         if (existing != null && !existing.isEmpty()) {
             scopes.addAll(Arrays.asList(existing.split(",")));
         }
         userSession.setNote(key, scopes.stream().sorted().collect(Collectors.joining(",")));
-        logger.debugf("AAuth session consent: recorded for agent=%s resource=%s scopes=%s", agentId, resourceId, scopes);
     }
 
-    /**
-     * Returns true if the user session already has consent for this agent, resource, and at least the requested scopes.
-     * Used to skip the consent screen when the user already consented in this session.
-     */
-    private boolean hasSessionConsent(UserSessionModel userSession, String agentId, String resourceId, String scopeString) {
-        if (agentId == null || resourceId == null) {
-            return false;
-        }
+    private boolean hasSessionConsent(UserSessionModel userSession, String agentId,
+            String resourceId, String scopeString) {
+        if (agentId == null || resourceId == null) return false;
         Set<String> requested = parseScopes(scopeString);
-        if (requested.isEmpty()) {
-            return true;
-        }
+        if (requested.isEmpty()) return true;
         String key = consentNoteKey(agentId, resourceId);
         String value = userSession.getNote(key);
-        if (value == null || value.isEmpty()) {
-            return false;
-        }
+        if (value == null || value.isEmpty()) return false;
         Set<String> consented = new LinkedHashSet<>(Arrays.asList(value.split(",")));
-        boolean covered = consented.containsAll(requested);
-        if (covered) {
-            logger.debugf("AAuth session consent: skipping consent screen (already consented this session) agent=%s resource=%s", agentId, resourceId);
-        }
-        return covered;
+        return consented.containsAll(requested);
     }
 
     private static Set<String> parseScopes(String scopeString) {
-        if (scopeString == null || scopeString.trim().isEmpty()) {
-            return Collections.emptySet();
-        }
+        if (scopeString == null || scopeString.trim().isEmpty()) return Collections.emptySet();
         return Arrays.stream(scopeString.trim().split("\\s+"))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
@@ -522,15 +673,13 @@ public class AAuthAuthorizationEndpoint {
     private void checkSsl() {
         if (!session.getContext().getUri().getBaseUri().getScheme().equals("https")
                 && realm.getSslRequired().isRequired(clientConnection)) {
-            throw new ErrorPageException(session, null, Response.Status.FORBIDDEN,
-                    "HTTPS required");
+            throw new ErrorPageException(session, null, Response.Status.FORBIDDEN, "HTTPS required");
         }
     }
 
     private void checkRealm() {
         if (!realm.isEnabled()) {
-            throw new ErrorPageException(session, null, Response.Status.FORBIDDEN,
-                    "Realm not enabled");
+            throw new ErrorPageException(session, null, Response.Status.FORBIDDEN, "Realm not enabled");
         }
     }
 }

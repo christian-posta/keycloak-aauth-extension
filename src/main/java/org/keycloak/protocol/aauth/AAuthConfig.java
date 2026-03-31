@@ -44,6 +44,7 @@ public class AAuthConfig {
     public static final String EXCHANGE_MAX_DEPTH = "aauth.exchange.max.depth";
     public static final String CONSENT_REQUIRED_SCOPES = "aauth.consent.required.scopes";
     public static final String CONSENT_REQUIRED_SCOPE_PREFIXES = "aauth.consent.required.scope.prefixes";
+    public static final String CLARIFICATION_REQUIRED_SCOPES = "aauth.clarification.required.scopes";
 
     // Default values
     public static final int DEFAULT_TOKEN_LIFESPAN = 300; // 5 minutes
@@ -234,12 +235,12 @@ public class AAuthConfig {
 
     /**
      * Check if a scope requires user consent.
-     *
+     * 
      * Behavior:
      * - If both consent-required scopes and prefixes are empty (not configured),
      *   uses backward-compatible defaults: openid, profile, email, and prefixes user., profile., email.
      * - If either list is non-empty, uses only the configured lists (no defaults).
-     *
+     * 
      * @param scope the scope name to check
      * @return true if the scope requires user consent
      */
@@ -274,6 +275,26 @@ public class AAuthConfig {
             }
         }
 
+        return false;
+    }
+
+    /**
+     * Get list of scopes that trigger clarification chat mode during consent.
+     */
+    public List<String> getClarificationRequiredScopes() {
+        return getJsonListAttribute(CLARIFICATION_REQUIRED_SCOPES);
+    }
+
+    /**
+     * Check if any scope in the given space-separated scope string requires clarification.
+     */
+    public boolean requiresClarification(String scopeString) {
+        if (scopeString == null || scopeString.trim().isEmpty()) return false;
+        List<String> clarificationScopes = getClarificationRequiredScopes();
+        if (clarificationScopes.isEmpty()) return false;
+        for (String scope : scopeString.split("\\s+")) {
+            if (clarificationScopes.contains(scope)) return true;
+        }
         return false;
     }
 

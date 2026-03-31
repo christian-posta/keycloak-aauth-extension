@@ -26,10 +26,12 @@ import org.keycloak.protocol.aauth.AAuthConfig;
 import org.keycloak.protocol.aauth.AAuthTokenManager;
 import org.keycloak.protocol.aauth.policy.AAuthPolicyEvaluator;
 import org.keycloak.protocol.aauth.policy.DefaultAAuthPolicyEvaluator;
-import org.keycloak.protocol.aauth.storage.AAuthRequestTokenStore;
+import org.keycloak.jose.jwk.JWKBuilder;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequest;
+import org.keycloak.protocol.aauth.storage.AAuthPendingRequestStore;
 import org.keycloak.protocol.aauth.tokens.ResourceTokenValidator;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantType;
-import org.keycloak.protocol.aauth.representations.AAuthTokenResponse;
+import org.keycloak.representations.AAuthTokenResponse;
 import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.cors.Cors;
@@ -39,6 +41,8 @@ import jakarta.ws.rs.core.Response;
 
 import java.security.PublicKey;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -161,30 +165,50 @@ public class AuthGrantType implements OAuth2GrantType {
 
         // Evaluate authorization policy - determine if user consent is required
         boolean requiresConsent = requiresUserConsent(realm, grantedScope, resourceId);
+        logger.infof("AAuth auth grant: scope=%s, requiresConsent=%s, redirectUri=%s", 
+                grantedScope, requiresConsent, redirectUri != null ? "present" : "null");
         
         if (requiresConsent) {
-            // User consent required - issue request_token
-            if (redirectUri == null || redirectUri.isEmpty()) {
-                throw new CorsErrorResponseException(cors, OAuthErrorException.INVALID_REQUEST,
-                        "redirect_uri is required when user consent is needed", Response.Status.BAD_REQUEST);
-            }
-            
+            // User consent required - create pending request and return 202
             AAuthTokenManager tokenManager = new AAuthTokenManager(session);
             String agentJkt = tokenManager.calculateAgentJkt(agentPublicKey);
-            
-            AAuthRequestTokenStore tokenStore = new AAuthRequestTokenStore(session);
-            String requestToken = tokenStore.createRequestToken(
+
+            String purpose = context.getFormParams().getFirst("purpose");
+            String callbackUrl = redirectUri; // treat redirect_uri as callback hint
+
+            // Determine if clarification mode should be enabled for this request
+            AAuthConfig config = AAuthConfig.forRealm(realm);
+            boolean clarificationEnabled = config.requiresClarification(grantedScope);
+
+            // Store agent public key JWK keyed by JKT so the interaction endpoint
+            // can retrieve it when building the auth token during consent
+            storeAgentPublicKey(session, agentPublicKey, agentJkt);
+
+            AAuthPendingRequestStore pendingStore = new AAuthPendingRequestStore(session);
+            AAuthPendingRequest pending = pendingStore.createPendingRequest(
                     agentId, agentJkt, signatureScheme, resourceId, grantedScope,
-                    authRequestUrl, redirectUri, state);
-            
-            AAuthTokenResponse response = new AAuthTokenResponse();
-            response.setRequestToken(requestToken);
-            response.setExpiresIn(600); // 10 minutes
-            response.setTokenType("AAuth");
-            
-            logger.debugf("Issued request_token for agent: %s, resource: %s (user consent required)", agentId, resourceId);
-            
-            return cors.add(Response.ok(response, MediaType.APPLICATION_JSON_TYPE));
+                    purpose, AAuthPendingRequest.REQUIRE_INTERACTION, callbackUrl, clarificationEnabled);
+
+            String pendingPath = buildPendingPath(session, pending.getId());
+
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("status", "pending");
+            body.put("location", pendingPath);
+            body.put("require", "interaction");
+            body.put("code", pending.getInteractionCode());
+
+            String aAuthHeader = "require=interaction; code=\"" + pending.getInteractionCode() + "\"";
+
+            logger.infof("AAuth: Created pending request id=%s code=%s for agent=%s, resource=%s",
+                    pending.getId(), pending.getInteractionCode(), agentId, resourceId);
+
+            return cors.add(Response.status(202)
+                    .header("Location", pendingPath)
+                    .header("Retry-After", "0")
+                    .header("Cache-Control", "no-store")
+                    .header("AAuth", aAuthHeader)
+                    .entity(body)
+                    .type(MediaType.APPLICATION_JSON_TYPE));
         }
 
         // Direct grant - no user consent needed
@@ -203,18 +227,53 @@ public class AuthGrantType implements OAuth2GrantType {
         AAuthTokenResponse response = new AAuthTokenResponse();
         response.setAuthToken(authToken);
         response.setExpiresIn(tokenManager.getTokenExpiration(realm));
-        response.setTokenType("AAuth");
 
         logger.debugf("Issued auth token for agent: %s, resource: %s", agentId, resourceId);
 
         return cors.add(Response.ok(response, MediaType.APPLICATION_JSON_TYPE));
     }
 
+    private void storeAgentPublicKey(KeycloakSession session, PublicKey agentPublicKey, String agentJkt) {
+        try {
+            org.keycloak.jose.jwk.JWK jwk = buildJwk(agentPublicKey);
+            String jwkJson = org.keycloak.util.JsonSerialization.writeValueAsString(jwk);
+            Map<String, String> keyData = new java.util.HashMap<>();
+            keyData.put("jwk", jwkJson);
+            // Store for 10 minutes (same as pending request TTL)
+            session.singleUseObjects().put("aauth.agentkey." + agentJkt, 600, keyData);
+        } catch (Exception e) {
+            logger.warnf(e, "Failed to store agent public key for JKT: %s", agentJkt);
+        }
+    }
+
+    private org.keycloak.jose.jwk.JWK buildJwk(PublicKey publicKey) {
+        String algorithm = publicKey.getAlgorithm();
+        if ("EdDSA".equals(algorithm) || publicKey instanceof java.security.interfaces.EdECPublicKey) {
+            return org.keycloak.jose.jwk.JWKBuilder.create().okp(publicKey);
+        } else if ("RSA".equals(algorithm) || publicKey instanceof java.security.interfaces.RSAPublicKey) {
+            return org.keycloak.jose.jwk.JWKBuilder.create().rsa(publicKey, null, null);
+        } else if ("EC".equals(algorithm) || publicKey instanceof java.security.interfaces.ECPublicKey) {
+            return org.keycloak.jose.jwk.JWKBuilder.create().ec(publicKey, null, null);
+        } else {
+            throw new RuntimeException("Unsupported public key type: " + algorithm);
+        }
+    }
+
+    private String buildPendingPath(KeycloakSession session, String pendingId) {
+        try {
+            String base = session.getContext().getUri().getBaseUri().toString();
+            if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+            String realmName = session.getContext().getRealm().getName();
+            return base + "/realms/" + realmName + "/protocol/aauth/pending/" + pendingId;
+        } catch (Exception e) {
+            return "/pending/" + pendingId;
+        }
+    }
+
     /**
      * Determine if user consent is required for this authorization request.
-     *
-     * Configurable policy - require consent based on realm attributes
-     * (aauth.consent.required.scopes, aauth.consent.required.scope.prefixes).
+     * 
+     * Phase 1: Configurable policy - require consent based on realm attributes.
      * Falls back to backward-compatible defaults if not configured.
      */
     private boolean requiresUserConsent(RealmModel realm, String scope, String resourceId) {
@@ -225,6 +284,10 @@ public class AuthGrantType implements OAuth2GrantType {
                 if (config.isConsentRequiredForScope(s)) {
                     return true;
                 }
+            }
+            // Clarification scopes always imply consent is required
+            if (config.requiresClarification(scope)) {
+                return true;
             }
         }
         // Future: Check resource-specific policies, user context requirements, etc.

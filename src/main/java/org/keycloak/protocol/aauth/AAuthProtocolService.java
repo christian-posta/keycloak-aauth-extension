@@ -22,6 +22,7 @@ import org.keycloak.jose.jwk.JSONWebKeySet;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.protocol.aauth.endpoints.AAuthAuthorizationEndpoint;
+import org.keycloak.protocol.aauth.endpoints.AAuthPendingEndpoint;
 import org.keycloak.protocol.aauth.endpoints.AAuthTokenEndpoint;
 import org.keycloak.protocol.oidc.utils.JWKSServerUtils;
 import org.keycloak.services.cors.Cors;
@@ -30,14 +31,23 @@ import org.keycloak.services.util.CacheControlUtil;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.OPTIONS;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 /**
  * Resource class for AAuth protocol endpoints.
- * 
- * Similar to OIDCLoginProtocolService but for AAuth protocol.
+ *
+ * Endpoint paths (per updated AAuth spec):
+ *   POST /token          - Token endpoint (was /agent/token)
+ *   GET  /interact       - Interaction endpoint (was /agent/auth)
+ *   GET  /pending/{id}   - Pending request polling endpoint (new)
+ *   GET  /certs          - JWKS public keys
+ *
+ * Legacy paths kept for backward compatibility during migration:
+ *   /agent/token → /token
+ *   /agent/auth  → /interact
  */
 public class AAuthProtocolService {
 
@@ -51,20 +61,34 @@ public class AAuthProtocolService {
         this.event = event;
     }
 
-    /**
-     * Agent token endpoint for auth requests, code exchange, token exchange, and refresh.
-     */
+    /** Token endpoint - primary path per updated spec */
+    @Path("token")
+    public Object token() {
+        return new AAuthTokenEndpoint(session, event);
+    }
+
+    /** Token endpoint - legacy path for backward compatibility */
     @Path("agent/token")
     public Object agentToken() {
         return new AAuthTokenEndpoint(session, event);
     }
 
-    /**
-     * Agent auth endpoint for user authentication and consent flow (Phase 3).
-     */
+    /** Interaction endpoint - primary path per updated spec */
+    @Path("interact")
+    public Object interact() {
+        return new AAuthAuthorizationEndpoint(session, event);
+    }
+
+    /** Interaction endpoint - legacy path for backward compatibility */
     @Path("agent/auth")
     public Object agentAuth() {
         return new AAuthAuthorizationEndpoint(session, event);
+    }
+
+    /** Pending request polling endpoint */
+    @Path("pending/{id}")
+    public Object pending(@PathParam("id") String pendingId) {
+        return new AAuthPendingEndpoint(session, event, pendingId);
     }
 
     @OPTIONS
@@ -85,4 +109,3 @@ public class AAuthProtocolService {
         return Cors.builder().allowedOrigins("*").auth().add(responseBuilder);
     }
 }
-

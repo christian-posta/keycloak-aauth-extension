@@ -39,6 +39,7 @@ import org.keycloak.protocol.aauth.representations.AAuthActorClaim;
 import org.keycloak.protocol.aauth.representations.AAuthRefreshToken;
 import org.keycloak.protocol.aauth.representations.AAuthToken;
 import org.keycloak.protocol.aauth.util.AAuthJWKSUtils;
+import org.keycloak.representations.JsonWebToken;
 import org.keycloak.services.Urls;
 
 import java.security.PublicKey;
@@ -168,6 +169,93 @@ public class AAuthTokenManager {
     public String calculateAgentJkt(PublicKey agentPublicKey) {
         JWK agentJwk = convertPublicKeyToJWK(agentPublicKey);
         return AAuthJWKSUtils.computeThumbprint(agentJwk);
+    }
+
+    /**
+     * Refresh by re-presenting an expired auth token (per updated AAuth spec Section 11.6).
+     * Verifies the JWT signature (ignoring exp), verifies agent key binding via cnf.jwk,
+     * then issues a new auth token with the same claims.
+     */
+    @SuppressWarnings("unchecked")
+    public String refreshFromExpiredAuthToken(RealmModel realm, String expiredAuthTokenJwt,
+            PublicKey agentPublicKey) throws Exception {
+
+        JWSInput jws = new JWSInput(expiredAuthTokenJwt);
+
+        String typ = jws.getHeader().getType();
+        if (!"auth+jwt".equals(typ)) {
+            throw new Exception("Invalid token type for refresh, expected auth+jwt, got: " + typ);
+        }
+
+        String kid = jws.getHeader().getKeyId();
+        String algorithm = jws.getHeader().getRawAlgorithm();
+        String normalizedAlg = "EdDSA".equals(algorithm) ? "Ed25519" : algorithm;
+
+        KeyWrapper signingKey = session.keys().getKeysStream(realm)
+                .filter(k -> k.getStatus().isEnabled())
+                .filter(k -> KeyUse.SIG.equals(k.getUse()))
+                .filter(k -> normalizedAlg.equals(k.getAlgorithm()))
+                .filter(k -> kid == null || kid.equals(k.getKid()))
+                .findFirst().orElse(null);
+
+        if (signingKey == null) {
+            throw new Exception("No key found to verify expired auth token: kid=" + kid + " alg=" + algorithm);
+        }
+
+        SignatureProvider sigProv = session.getProvider(SignatureProvider.class, normalizedAlg);
+        if (sigProv == null) {
+            throw new Exception("Unsupported signature algorithm: " + algorithm);
+        }
+
+        SignatureVerifierContext verifier = sigProv.verifier(signingKey);
+        if (!verifier.verify(jws.getEncodedSignatureInput().getBytes("UTF-8"), jws.getSignature())) {
+            throw new Exception("Expired auth token signature verification failed");
+        }
+
+        JsonWebToken token = jws.readJsonContent(JsonWebToken.class);
+
+        String currentJkt = calculateAgentJkt(agentPublicKey);
+        Map<String, Object> otherClaims = token.getOtherClaims();
+        if (otherClaims != null && otherClaims.get("cnf") instanceof Map) {
+            Map<String, Object> cnf = (Map<String, Object>) otherClaims.get("cnf");
+            Object jwkObj = cnf.get("jwk");
+            if (jwkObj instanceof Map) {
+                try {
+                    String jwkJson = org.keycloak.util.JsonSerialization.writeValueAsString(jwkObj);
+                    JWK jwk = org.keycloak.util.JsonSerialization.readValue(jwkJson, JWK.class);
+                    String tokenJkt = AAuthJWKSUtils.computeThumbprint(jwk);
+                    if (!currentJkt.equals(tokenJkt)) {
+                        throw new Exception("Agent key mismatch: cnf.jwk in token does not match current agent key");
+                    }
+                } catch (Exception e) {
+                    if (e.getMessage() != null && e.getMessage().startsWith("Agent key mismatch")) throw e;
+                    logger.warnf(e, "Could not verify cnf.jwk during token refresh");
+                }
+            }
+        }
+
+        String agentId = null;
+        String agentDelegate = null;
+        String resourceId = token.getAudience() != null && token.getAudience().length > 0
+                ? token.getAudience()[0] : null;
+        String scope = null;
+        String subject = token.getSubject();
+
+        if (otherClaims != null) {
+            agentId = otherClaims.get("agent") instanceof String ? (String) otherClaims.get("agent") : null;
+            agentDelegate = otherClaims.get("agent_delegate") instanceof String
+                    ? (String) otherClaims.get("agent_delegate") : null;
+            scope = otherClaims.get("scope") instanceof String ? (String) otherClaims.get("scope") : null;
+        }
+
+        if (agentId == null) agentId = resourceId;
+
+        UserModel user = null;
+        if (subject != null) {
+            user = session.users().getUserById(realm, subject);
+        }
+
+        return createAuthToken(realm, agentId, agentDelegate, agentPublicKey, resourceId, scope, user);
     }
 
     /**
