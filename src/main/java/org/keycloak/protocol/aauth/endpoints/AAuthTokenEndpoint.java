@@ -27,7 +27,7 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.protocol.aauth.AAuthTokenManager;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantType;
-import org.keycloak.representations.AAuthTokenResponse;
+import org.keycloak.protocol.aauth.representations.AAuthTokenResponse;
 import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.cors.Cors;
 

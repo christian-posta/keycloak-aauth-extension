@@ -31,7 +31,7 @@ import org.keycloak.protocol.aauth.storage.AAuthPendingRequest;
 import org.keycloak.protocol.aauth.storage.AAuthPendingRequestStore;
 import org.keycloak.protocol.aauth.tokens.ResourceTokenValidator;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantType;
-import org.keycloak.representations.AAuthTokenResponse;
+import org.keycloak.protocol.aauth.representations.AAuthTokenResponse;
 import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.cors.Cors;
