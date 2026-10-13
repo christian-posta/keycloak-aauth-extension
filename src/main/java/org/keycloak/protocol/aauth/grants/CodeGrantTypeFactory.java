@@ -17,6 +17,7 @@
 
 package org.keycloak.protocol.aauth.grants;
 
+import com.google.auto.service.AutoService;
 import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
@@ -26,6 +27,7 @@ import org.keycloak.protocol.oidc.grants.OAuth2GrantTypeFactory;
 /**
  * Factory for Code grant type (request_type=code).
  */
+@AutoService(OAuth2GrantTypeFactory.class)
 public class CodeGrantTypeFactory implements OAuth2GrantTypeFactory {
 
     public static final String GRANT_TYPE = "code";

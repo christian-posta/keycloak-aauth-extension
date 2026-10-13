@@ -106,6 +106,6 @@ public class AAuthProtocolService {
 
         Response.ResponseBuilder responseBuilder = Response.ok(keySet)
                 .cacheControl(CacheControlUtil.getDefaultCacheControl());
-        return Cors.builder().allowedOrigins("*").auth().add(responseBuilder);
+        return Cors.builder().allowAllOrigins().auth().add(responseBuilder);
     }
 }

@@ -17,23 +17,21 @@
 
 package org.keycloak.protocol.aauth.federation;
 
-import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.KeycloakSessionFactory;
 import org.keycloak.models.RealmModel;
 
 /**
  * Factory for AuthServerTrustManager.
- * 
+ * <p>
  * Provides a simple way to create trust managers for realms.
  */
 public class AuthServerTrustManagerFactory {
 
     /**
      * Create a trust manager for the given realm.
-     * 
+     *
      * @param session The Keycloak session
-     * @param realm The realm
+     * @param realm   The realm
      * @return Trust manager instance
      */
     public static AuthServerTrustManager create(KeycloakSession session, RealmModel realm) {

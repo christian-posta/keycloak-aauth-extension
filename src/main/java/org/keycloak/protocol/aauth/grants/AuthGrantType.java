@@ -17,6 +17,8 @@
 
 package org.keycloak.protocol.aauth.grants;
 
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.keycloak.OAuthErrorException;
 import org.keycloak.events.EventType;
@@ -26,18 +28,14 @@ import org.keycloak.protocol.aauth.AAuthConfig;
 import org.keycloak.protocol.aauth.AAuthTokenManager;
 import org.keycloak.protocol.aauth.policy.AAuthPolicyEvaluator;
 import org.keycloak.protocol.aauth.policy.DefaultAAuthPolicyEvaluator;
-import org.keycloak.jose.jwk.JWKBuilder;
+import org.keycloak.protocol.aauth.representations.AAuthTokenResponse;
 import org.keycloak.protocol.aauth.storage.AAuthPendingRequest;
 import org.keycloak.protocol.aauth.storage.AAuthPendingRequestStore;
 import org.keycloak.protocol.aauth.tokens.ResourceTokenValidator;
 import org.keycloak.protocol.oidc.grants.OAuth2GrantType;
-import org.keycloak.protocol.aauth.representations.AAuthTokenResponse;
 import org.keycloak.services.CorsErrorResponseException;
 import org.keycloak.services.Urls;
 import org.keycloak.services.cors.Cors;
-
-import jakarta.ws.rs.core.MediaType;
-import jakarta.ws.rs.core.Response;
 
 import java.security.PublicKey;
 import java.util.Collections;
@@ -58,6 +56,11 @@ public class AuthGrantType implements OAuth2GrantType {
     @Override
     public EventType getEventType() {
         return EventType.CLIENT_LOGIN; // Machine-to-machine flow similar to client credentials
+    }
+
+    @Override
+    public Set<String> getTokenParameterNames() {
+        return Set.of("resource_token");
     }
 
     @Override

@@ -55,6 +55,11 @@ public class RefreshGrantType implements OAuth2GrantType {
     }
 
     @Override
+    public Set<String> getTokenParameterNames() {
+        return Collections.emptySet();
+    }
+
+    @Override
     public Set<String> getSupportedMultivaluedRequestParameters() {
         return Collections.emptySet();
     }

@@ -79,7 +79,7 @@ public class AAuthTokenEndpoint {
         this.event = event;
         this.request = session.getContext().getHttpRequest();
         this.httpResponse = session.getContext().getHttpResponse();
-        this.headers = session.getContext().getRequestHeaders();
+        this.headers = session.getContext().getHttpRequest().getHttpHeaders();
     }
 
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)

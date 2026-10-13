@@ -69,6 +69,11 @@ public class ExchangeGrantType implements OAuth2GrantType {
     }
 
     @Override
+    public Set<String> getTokenParameterNames() {
+        return Set.of("resource_token", "upstream_token");
+    }
+
+    @Override
     public Set<String> getSupportedMultivaluedRequestParameters() {
         return Collections.emptySet();
     }

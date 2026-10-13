@@ -17,6 +17,7 @@
 
 package org.keycloak.protocol.aauth;
 
+import com.google.auto.service.AutoService;
 import org.jboss.logging.Logger;
 import org.keycloak.Config;
 import org.keycloak.events.EventBuilder;
@@ -28,6 +29,7 @@ import org.keycloak.models.RealmModel;
 import org.keycloak.protocol.LoginProtocol;
 import org.keycloak.protocol.LoginProtocolFactory;
 import org.keycloak.representations.idm.ClientRepresentation;
+import org.keycloak.representations.idm.ClientScopeRepresentation;
 
 import java.util.Collections;
 import java.util.Map;
@@ -35,6 +37,7 @@ import java.util.Map;
 /**
  * Factory for AAuth protocol endpoints.
  */
+@AutoService(LoginProtocolFactory.class)
 public class AAuthLoginProtocolFactory implements LoginProtocolFactory {
 
     private static final Logger logger = Logger.getLogger(AAuthLoginProtocolFactory.class);
@@ -97,13 +100,18 @@ public class AAuthLoginProtocolFactory implements LoginProtocolFactory {
     }
 
     @Override
-    public void createDefaultClientScopes(RealmModel newRealm, boolean addScopesToExistingClients) {
+    public void createDefaultClientScopes(KeycloakSession session, RealmModel newRealm, boolean addScopesToExistingClients) {
         // No default client scopes for Phase 2
     }
 
     @Override
     public void setupClientDefaults(ClientRepresentation rep, ClientModel newClient) {
         // No client defaults for Phase 2
+    }
+
+    @Override
+    public void addClientScopeDefaults(ClientScopeRepresentation rep) {
+        // No client scope defaults for Phase 2
     }
 
     @Override

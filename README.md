@@ -11,14 +11,14 @@ This extension provides the AAuth (Autonomous Authorization) protocol implementa
   - `code` - Authorization code flow with user consent
   - `refresh` - Token refresh flow
   - `exchange` - Token exchange flow for delegation chains
-- **Well-Known Endpoint** - `/.well-known/aauth-issuer` for issuer metadata
+- **Well-Known Endpoint** - `/.well-known/aauth-issuer.json` for issuer metadata
 - **Policy Evaluation** - Configurable agent and scope policies
 - **Federation Support** - Trust management for external auth servers
 
 ## Requirements
 
-- Keycloak 26.2.5 or later
-- Java 17 or later
+- Keycloak 26.8.1 or later
+- Java 21 or later
 
 ## Installation
 
@@ -139,34 +139,66 @@ Configure which agents are allowed to request tokens:
 
 Get issuer metadata:
 ```bash
-curl https://keycloak.example.com/realms/{realm}/.well-known/aauth-issuer
+curl https://keycloak.example.com/realms/{realm}/.well-known/aauth-issuer.json
 ```
 
 ### Request Auth Token
+
+All requests to the token endpoint must be signed with [HTTP Message Signatures (RFC 9421)](https://www.rfc-editor.org/rfc/rfc9421.html).
+The request type is selected with the `request_type` parameter (`auth`, `code`, `refresh`,
+`exchange`). If it is omitted, the server derives it from the parameters that are present
+(`scope` or `resource_token` → `auth`, `resource_token` + `upstream_token` → `exchange`).
 
 **Direct Grant (no user consent):**
 ```bash
 curl -X POST "https://keycloak.example.com/realms/{realm}/protocol/aauth/agent/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -H "Signature-Key: keyid=\"...\", scheme=\"jwt\", ..." \
-  -H "Signature-Input: sig1=..." \
-  -H "Signature: sig1=:..." \
-  -d "grant_type=auth&scope=read write&resource_id=https://resource.example.com"
+  -H "Signature-Key: sig=hwk;kty=\"OKP\";crv=\"Ed25519\";x=\"...\"" \
+  -H "Signature-Input: sig=(\"@method\" \"@authority\" \"@path\" \"content-type\" \"content-digest\" \"signature-key\");created=..." \
+  -H "Signature: sig=:...:" \
+  -d "request_type=auth&scope=read write&resource_id=https://resource.example.com"
+```
+
+Scopes that do not require consent (see above) yield an `auth_token` directly:
+```json
+{"auth_token": "eyJ...", "expires_in": 3600}
 ```
 
 **Authorization Code Flow (with user consent):**
-```bash
-# Step 1: Request authorization
-curl "https://keycloak.example.com/realms/{realm}/protocol/aauth/agent/auth?request_token=..."
 
-# Step 2: Exchange code for token
+If a requested scope requires user consent, the same request is answered with
+`202 Accepted`, a pending request `location` and an interaction `code`:
+```bash
 curl -X POST "https://keycloak.example.com/realms/{realm}/protocol/aauth/agent/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -H "Signature-Key: ..." \
   -H "Signature-Input: ..." \
   -H "Signature: ..." \
-  -d "grant_type=code&code=..."
+  -d "request_type=auth&scope=openid&redirect_uri=https://agent.example.com/callback"
 ```
+```json
+{
+  "status": "pending",
+  "location": "https://keycloak.example.com/realms/{realm}/protocol/aauth/pending/{id}",
+  "require": "interaction",
+  "code": "ABCD1234"
+}
+```
+
+```bash
+# Step 1: Send the user to the interaction URL. Keycloak authenticates the user
+# and renders the consent page (login-aauth-grant.ftl).
+open "https://keycloak.example.com/realms/{realm}/protocol/aauth/interact?code=ABCD1234"
+
+# Step 2: Poll the pending URL until the user has decided. While pending it answers
+# 202, after consent it returns the auth token (403 if the user denied).
+curl "https://keycloak.example.com/realms/{realm}/protocol/aauth/pending/{id}"
+```
+```json
+{"auth_token": "eyJ...", "expires_in": 3600}
+```
+
+`/protocol/aauth/agent/auth` is kept as an alias for `/protocol/aauth/interact`.
 
 ## Architecture
 
@@ -192,15 +224,28 @@ The extension integrates with Keycloak via:
 
 - **Admin UI:** Admin UI components are not included in this extension. Configuration must be done via Admin API or realm attributes.
 - **Internal APIs:** This extension uses some internal Keycloak APIs (from `server-spi-private` and `services` modules). These APIs may change in future Keycloak versions.
-- **Version Compatibility:** Tested with Keycloak 26.2.5. Compatibility with other versions is not guaranteed.
+- **Version Compatibility:** Tested with Keycloak 26.8.1. Compatibility with other versions is not guaranteed.
 
 ## Development
 
 ### Building from Source
 
 ```bash
-mvn clean install
+mvn clean package
 ```
+
+### Tests
+
+Unit tests run with `mvn test`. The integration tests (`*IT`) start Keycloak 26.8.1 with
+the extension deployed via Testcontainers, so `mvn verify` and `mvn install` require a
+running Docker daemon. To build without Docker, skip them:
+
+```bash
+mvn clean install -DskipITs
+```
+
+The integration tests exercise the README examples, including the full user consent flow
+with the consent page rendered by both the `keycloak.v2` and the classic `keycloak` login theme.
 
 ### Project Structure
 
@@ -217,9 +262,11 @@ keycloak-aauth-extension/
         │       └── util/             # Utility classes
         └── resources/
             └── META-INF/
-                ├── beans.xml         # JAX-RS configuration
-                └── services/         # SPI registrations
+                └── beans.xml         # JAX-RS configuration
 ```
+
+The `META-INF/services/` SPI registration files are generated at build time from
+`@AutoService` annotations on the factory classes.
 
 ## Troubleshooting
 
@@ -239,7 +286,7 @@ If the protocol is not available:
 1. Verify JAR is in `providers/` directory
 2. Rebuild Keycloak: `./kc.sh build`
 3. Check logs for SPI registration errors
-4. Verify `META-INF/services/` files are correct
+4. Verify the generated `META-INF/services/` files in the built JAR are correct
 
 ### Import Errors
 

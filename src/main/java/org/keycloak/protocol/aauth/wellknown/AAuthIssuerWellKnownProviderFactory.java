@@ -17,6 +17,7 @@
 
 package org.keycloak.protocol.aauth.wellknown;
 
+import com.google.auto.service.AutoService;
 import org.keycloak.Config;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.KeycloakSessionFactory;
@@ -26,6 +27,7 @@ import org.keycloak.wellknown.WellKnownProviderFactory;
 /**
  * Factory for AAuth Issuer Well-Known Provider.
  */
+@AutoService(WellKnownProviderFactory.class)
 public class AAuthIssuerWellKnownProviderFactory implements WellKnownProviderFactory {
 
     public static final String PROVIDER_ID = "aauth-issuer.json";
